@@ -66,19 +66,65 @@ try { fs.readdirSync(RUN_DIR).forEach(f => {
 const app = express();
 app.disable('x-powered-by');
 
-// ==================== Xray 配置（VLESS-WS + Early Data） ====================
+// ==================== Xray 配置（多协议：VLESS-TCP + VLESS-WS + VMess-WS + Trojan-WS） ====================
 function generateConfig() {
   fs.writeFileSync(cfgPath, JSON.stringify({
     dns: { servers: ["https+local://8.8.8.8/dns-query"] },
     log: { access: '/dev/null', error: '/dev/null', loglevel: 'none' },
-    inbounds: [{
-      port: ARGO_PORT,
-      listen: '127.0.0.1',
-      protocol: 'vless',
-      settings: { clients: [{ id: UUID, level: 0 }], decryption: 'none' },
-      streamSettings: { network: 'ws', security: 'none', wsSettings: { path: '/vless-argo?ed=2560' } },
-      sniffing: { enabled: false },
-    }],
+    inbounds: [
+      // 主入口：VLESS-TCP，通过 fallback 将不同 path 分流到不同协议
+      {
+        port: ARGO_PORT,
+        listen: '127.0.0.1',
+        protocol: 'vless',
+        settings: {
+          clients: [{ id: UUID, flow: 'xtls-rprx-vision' }],
+          decryption: 'none',
+          fallbacks: [
+            { dest: 3001 },                          // 默认回落
+            { path: '/vless-argo', dest: 3002 },     // VLESS-WS
+            { path: '/vmess-argo', dest: 3003 },     // VMess-WS
+            { path: '/trojan-argo', dest: 3004 },    // Trojan-WS
+          ],
+        },
+        streamSettings: { network: 'tcp' },
+      },
+      // 回落目标：纯 TCP VLESS
+      {
+        port: 3001,
+        listen: '127.0.0.1',
+        protocol: 'vless',
+        settings: { clients: [{ id: UUID }], decryption: 'none' },
+        streamSettings: { network: 'tcp', security: 'none' },
+      },
+      // VLESS-WS
+      {
+        port: 3002,
+        listen: '127.0.0.1',
+        protocol: 'vless',
+        settings: { clients: [{ id: UUID, level: 0 }], decryption: 'none' },
+        streamSettings: { network: 'ws', security: 'none', wsSettings: { path: '/vless-argo' } },
+        sniffing: { enabled: true, destOverride: ['http', 'tls', 'quic'], metadataOnly: false },
+      },
+      // VMess-WS
+      {
+        port: 3003,
+        listen: '127.0.0.1',
+        protocol: 'vmess',
+        settings: { clients: [{ id: UUID, alterId: 0 }] },
+        streamSettings: { network: 'ws', wsSettings: { path: '/vmess-argo' } },
+        sniffing: { enabled: true, destOverride: ['http', 'tls', 'quic'], metadataOnly: false },
+      },
+      // Trojan-WS
+      {
+        port: 3004,
+        listen: '127.0.0.1',
+        protocol: 'trojan',
+        settings: { clients: [{ password: UUID }] },
+        streamSettings: { network: 'ws', security: 'none', wsSettings: { path: '/trojan-argo' } },
+        sniffing: { enabled: true, destOverride: ['http', 'tls', 'quic'], metadataOnly: false },
+      },
+    ],
     outbounds: [
       { protocol: 'freedom', tag: 'direct' },
       { protocol: 'blackhole', tag: 'block' },
@@ -86,17 +132,73 @@ function generateConfig() {
   }));
 }
 
-// ==================== 订阅（内存缓存，不留盘） ====================
-function buildSub() {
-  const host = ARGO_DOMAIN;
-  if (!host) return '';
-  const n = encodeURIComponent(NAME);
-  const p = encodeURIComponent('/vless-argo?ed=2560');
-  return `vless://${UUID}@${CFIP}:${CFPORT}?encryption=none&security=tls&sni=${host}&fp=${FP}&type=ws&host=${host}&path=${p}#${n}`;
+// ==================== ISP 地理信息自动标注（双源回退） ====================
+async function getMetaInfo() {
+  // 主源：api.ip.sb
+  try {
+    const resp = await axios.get('https://api.ip.sb/geoip', {
+      headers: { 'User-Agent': 'Mozilla/5.0' },
+      timeout: 5000,
+    });
+    if (resp.data && resp.data.country_code && resp.data.isp) {
+      return `${resp.data.country_code}-${resp.data.isp}`.replace(/\s+/g, '_');
+    }
+  } catch (e) {}
+
+  // 备源：ip-api.com
+  try {
+    const resp = await axios.get('http://ip-api.com/json', {
+      headers: { 'User-Agent': 'Mozilla/5.0' },
+      timeout: 5000,
+    });
+    if (resp.data && resp.data.status === 'success' && resp.data.countryCode && resp.data.org) {
+      return `${resp.data.countryCode}-${resp.data.org}`.replace(/\s+/g, '_');
+    }
+  } catch (e) {}
+
+  return 'Unknown';
 }
 
-function refreshSub() {
-  cachedSub = Buffer.from(buildSub()).toString('base64');
+// ==================== 订阅（内存缓存，不留盘；多协议） ====================
+function buildSub(nodeName) {
+  const host = ARGO_DOMAIN;
+  if (!host) return '';
+
+  const n = encodeURIComponent(nodeName);
+
+  // VLESS-WS
+  const vlessLine = `vless://${UUID}@${CFIP}:${CFPORT}?encryption=none&security=tls&sni=${host}&fp=${FP}&type=ws&host=${host}&path=%2Fvless-argo%3Fed%3D2560#${n}`;
+
+  // VMess-WS（标准 vmess 链接格式：base64 编码的 JSON）
+  const vmessObj = {
+    v: '2',
+    ps: nodeName,
+    add: CFIP,
+    port: CFPORT,
+    id: UUID,
+    aid: '0',
+    scy: 'auto',
+    net: 'ws',
+    type: 'none',
+    host: host,
+    path: '/vmess-argo?ed=2560',
+    tls: 'tls',
+    sni: host,
+    alpn: '',
+    fp: FP,
+  };
+  const vmessLine = `vmess://${Buffer.from(JSON.stringify(vmessObj)).toString('base64')}`;
+
+  // Trojan-WS
+  const trojanLine = `trojan://${UUID}@${CFIP}:${CFPORT}?security=tls&sni=${host}&fp=${FP}&type=ws&host=${host}&path=%2Ftrojan-argo%3Fed%3D2560#${n}`;
+
+  return [vlessLine, vmessLine, trojanLine].join('\n');
+}
+
+async function refreshSub() {
+  const isp = await getMetaInfo();
+  const nodeName = NAME ? `${NAME}-${isp}` : isp;
+  cachedSub = Buffer.from(buildSub(nodeName)).toString('base64');
 }
 
 // ==================== 下载 ====================
@@ -204,7 +306,7 @@ app.use((req, res) => {
 // ==================== 主启动 ====================
 async function startserver() {
   generateConfig();
-  refreshSub();
+  await refreshSub();   // 改为 await，因为 refreshSub 现在是异步的（获取 ISP 信息）
 
   await installCore();
   startProcess('core', webPath, ['run', '-c', cfgPath]);
