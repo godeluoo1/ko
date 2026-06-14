@@ -9,6 +9,14 @@ const { pipeline } = require('stream/promises');
 
 process.title = 'npm start';
 
+// ==================== 针对 0.2vCPU 共享 / 512MB RAM 容器的极致优化 ====================
+// 1. 限制 Go 运行时最大线程数为 1，防止在 0.2vCPU 环境下因宿主机多核导致并发线程过多，产生严重 CPU 上下文切换损耗
+process.env.GOMAXPROCS = '1';
+// 2. 强制 Go 运行时在垃圾回收后立即将闲置物理内存归还给操作系统，防止内存在 512MB 容器中虚高被 OOM 杀掉
+process.env.GODEBUG = 'madvdontneed=1';
+// 3. 将 Go 垃圾回收触发阈值降低为 50（默认 100），使 xray/cloudflared 更频繁地回收内存，确保内存水位处于极低状态
+process.env.GOGC = '50';
+
 // ==================== 环境变量 ====================
 const PORT = Number(process.env.SERVER_PORT || process.env.PORT || 3000);
 const ARGO_PORT = Number(process.env.BACKEND_PORT || 8001);
@@ -235,8 +243,11 @@ async function installCloudflared() {
 }
 
 // ==================== 进程管理 ====================
-function startProcess(label, cmd, args) {
-  const child = spawn(cmd, args, { stdio: ['ignore', 'ignore', 'pipe'], env: process.env });
+function startProcess(label, cmd, args, extraEnv = {}) {
+  const child = spawn(cmd, args, { 
+    stdio: ['ignore', 'ignore', 'pipe'], 
+    env: { ...process.env, ...extraEnv } 
+  });
   child.stderr && child.stderr.on('data', d => console.error(`[${label}]`, d.toString().trim()));
   managedChildren.set(label, child);
   child.on('error', () => managedChildren.delete(label));
@@ -265,7 +276,8 @@ function startCloudflared() {
   }
 
   if (tunnelMode === 'token') {
-    return startProcess('cf', botPath, [...base, 'run', '--token', ARGO_AUTH]);
+    // 修复点：改用环境变量 TUNNEL_TOKEN 隐式传递，由 cloudflared 自动读取
+    return startProcess('cf', botPath, [...base, 'run'], { TUNNEL_TOKEN: ARGO_AUTH });
   }
 }
 
@@ -306,7 +318,7 @@ app.use((req, res) => {
 // ==================== 主启动 ====================
 async function startserver() {
   generateConfig();
-  await refreshSub();   // 改为 await，因为 refreshSub 现在是异步的（获取 ISP 信息）
+  await refreshSub();   // 改为 await，因为 refreshSub 现在是异步 of（获取 ISP 信息）
 
   await installCore();
   startProcess('core', webPath, ['run', '-c', cfgPath]);
