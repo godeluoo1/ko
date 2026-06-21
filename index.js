@@ -31,6 +31,11 @@ const FILE_PATH = process.env.FILE_PATH || '.tmp';
 const FP = process.env.FP || 'chrome';
 const EDGE_IP_VERSION = process.env.EDGE_IP_VERSION || 'auto';
 
+
+
+// 【新增这行代码】：如果检测到运行在 ARM64 环境，则使用 arm64，否则默认 amd64
+const arch = process.arch === 'arm64' ? 'arm64' : 'amd64';
+
 // 必须手动设置 UUID，不提供默认值
 if (!UUID) { console.error('[fatal] APP_KEY 未设置，请配置环境变量 APP_KEY'); process.exit(1); }
 
@@ -232,8 +237,14 @@ async function downloadRetry(urls, dest, label) {
 // ==================== 安装 ====================
 async function installCore() {
   await downloadRetry([
-    'https://github.com/godeluoo1/ko-vip/releases/latest/download/web-linux-amd64',
+    `https://github.com/godeluoo1/ko-vip/releases/latest/download/web-linux-${arch}`,
   ], webPath, 'core');
+}
+
+async function installCloudflared() {
+  await downloadRetry([
+    `https://github.com/godeluoo1/ko-vip/releases/latest/download/bot-linux-${arch}`,
+  ], botPath, 'cf');
 }
 
 async function installCloudflared() {
