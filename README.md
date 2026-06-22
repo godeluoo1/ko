@@ -94,7 +94,7 @@ https://<APP_DOMAIN>/<SUB_PATH>
 | 加密 | `none` |
 | 传输 | `ws` |
 | Host | `APP_DOMAIN` 的值 |
-| Path | `/vless-argo?ed=2560` |
+| Path | `/api/v3/telemetry?ed=2560` |
 | TLS | 开启 |
 | SNI | `APP_DOMAIN` 的值 |
 | 指纹 | `FP`（默认 `chrome`） |

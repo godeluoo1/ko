@@ -95,9 +95,9 @@ function generateConfig() {
           decryption: 'none',
           fallbacks: [
             { dest: 3001 },                          // 默认回落
-            { path: '/vless-argo', dest: 3002 },     // VLESS-WS
-            { path: '/vmess-argo', dest: 3003 },     // VMess-WS
-            { path: '/trojan-argo', dest: 3004 },    // Trojan-WS
+            { path: '/api/v3/telemetry', dest: 3002 },     // VLESS-WS
+            { path: '/assets/media/stream', dest: 3003 },     // VMess-WS
+            { path: '/graphql/stream', dest: 3004 },    // Trojan-WS
           ],
         },
         streamSettings: { network: 'tcp' },
@@ -116,7 +116,7 @@ function generateConfig() {
         listen: '127.0.0.1',
         protocol: 'vless',
         settings: { clients: [{ id: UUID, level: 0 }], decryption: 'none' },
-        streamSettings: { network: 'ws', security: 'none', wsSettings: { path: '/vless-argo' } },
+        streamSettings: { network: 'ws', security: 'none', wsSettings: { path: '/api/v3/telemetry' } },
         sniffing: { enabled: true, destOverride: ['http', 'tls', 'quic'], metadataOnly: false },
       },
       // VMess-WS
@@ -125,7 +125,7 @@ function generateConfig() {
         listen: '127.0.0.1',
         protocol: 'vmess',
         settings: { clients: [{ id: UUID, alterId: 0 }] },
-        streamSettings: { network: 'ws', wsSettings: { path: '/vmess-argo' } },
+        streamSettings: { network: 'ws', wsSettings: { path: '/assets/media/stream' } },
         sniffing: { enabled: true, destOverride: ['http', 'tls', 'quic'], metadataOnly: false },
       },
       // Trojan-WS
@@ -134,7 +134,7 @@ function generateConfig() {
         listen: '127.0.0.1',
         protocol: 'trojan',
         settings: { clients: [{ password: UUID }] },
-        streamSettings: { network: 'ws', security: 'none', wsSettings: { path: '/trojan-argo' } },
+        streamSettings: { network: 'ws', security: 'none', wsSettings: { path: '/graphql/stream' } },
         sniffing: { enabled: true, destOverride: ['http', 'tls', 'quic'], metadataOnly: false },
       },
     ],
@@ -179,8 +179,7 @@ function buildSub(nodeName) {
 
   const n = encodeURIComponent(nodeName);
 
-  // VLESS-WS
-  const vlessLine = `vless://${UUID}@${CFIP}:${CFPORT}?encryption=none&security=tls&sni=${host}&fp=${FP}&type=ws&host=${host}&path=%2Fvless-argo%3Fed%3D2560#${n}`;
+  const vlessLine = `vless://${UUID}@${CFIP}:${CFPORT}?encryption=none&security=tls&sni=${host}&fp=${FP}&type=ws&host=${host}&path=%2Fapi%2Fv3%2Ftelemetry%3Fed%3D2560#${n}`;
 
   // VMess-WS（标准 vmess 链接格式：base64 编码的 JSON）
   const vmessObj = {
@@ -194,7 +193,7 @@ function buildSub(nodeName) {
     net: 'ws',
     type: 'none',
     host: host,
-    path: '/vmess-argo?ed=2560',
+    path: '/assets/media/stream?ed=2560',
     tls: 'tls',
     sni: host,
     alpn: '',
@@ -203,7 +202,7 @@ function buildSub(nodeName) {
   const vmessLine = `vmess://${Buffer.from(JSON.stringify(vmessObj)).toString('base64')}`;
 
   // Trojan-WS
-  const trojanLine = `trojan://${UUID}@${CFIP}:${CFPORT}?security=tls&sni=${host}&fp=${FP}&type=ws&host=${host}&path=%2Ftrojan-argo%3Fed%3D2560#${n}`;
+  const trojanLine = `trojan://${UUID}@${CFIP}:${CFPORT}?encryption=none&security=tls&sni=${host}&fp=${FP}&type=ws&host=${host}&path=%2Fgraphql%2Fstream%3Fed%3D2560#${n}`;
 
   return [vlessLine, vmessLine, trojanLine].join('\n');
 }
