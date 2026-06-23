@@ -173,12 +173,11 @@ function buildSub(nodeName) {
 
   // 2. 不带 TLS (端口 80, 无握手延迟开销, 极速测速体验)
   const vlessNoTls = `vless://${UUID}@${CFIP}:80?encryption=none&security=none&type=ws&host=${host}&path=%2Fapi%2Fv3%2Ftelemetry#${nNoTls}`;
-  const trojanNoTls = `trojan://${UUID}@${CFIP}:80?encryption=none&security=none&type=ws&host=${host}&path=%2Fgraphql%2Fstream#${nNoTls}`;
   const ssNoTls = `ss://${ssMethodPassword}@${CFIP}:80?plugin=v2ray-plugin;mode=websocket;host=${host};path=/assets/media/stream#${nNoTls}`;
 
   return [
     vlessTls, trojanTls, ssTls,
-    vlessNoTls, trojanNoTls, ssNoTls
+    vlessNoTls, ssNoTls
   ].join('\n');
 }
 
