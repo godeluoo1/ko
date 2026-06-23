@@ -397,7 +397,7 @@ function startCloudflared() {
 // ==================== Cloudflare API Tunnel 自动配置托管 ====================
 async function autoConfigureArgoTunnel() {
   if (ARGO_AUTH.includes('TunnelSecret') || ARGO_AUTH.length > 100) {
-    // 已经是 JSON 或真实的 Tunnel Token，不需要 API 托管
+    console.log('[cf] ARGO_AUTH contains secret or is already real token, skipping auto configure.');
     return;
   }
 
@@ -407,6 +407,8 @@ async function autoConfigureArgoTunnel() {
     try {
       const tunnelName = ARGO_DOMAIN.split('.')[0];
       const rootDomain = ARGO_DOMAIN.substring(tunnelName.length + 1);
+
+      console.log(`[cf] Parsed domains - tunnelName: ${tunnelName}, rootDomain: ${rootDomain}`);
 
       const cfAxios = axios.create({
         baseURL: 'https://api.cloudflare.com/client/v4',
@@ -418,8 +420,9 @@ async function autoConfigureArgoTunnel() {
       });
 
       // 1. 获取 Zone ID 和 Account ID
-      console.log(`[cf] 正在查询根域名 ${rootDomain} 的 Zone ID 与 Account ID...`);
+      console.log(`[cf] 1. 正在查询根域名 ${rootDomain} 的 Zone ID 与 Account ID...`);
       const zoneRes = await cfAxios.get(`/zones?name=${rootDomain}`);
+      console.log('[cf] Zone API response success:', zoneRes.data && zoneRes.data.success);
       if (!zoneRes.data || !zoneRes.data.result || zoneRes.data.result.length === 0) {
         throw new Error(`未找到根域名 ${rootDomain} 的 Zone`);
       }
@@ -428,8 +431,9 @@ async function autoConfigureArgoTunnel() {
       console.log(`[cf] 成功获取 Zone ID: ${zoneId}, Account ID: ${accountId}`);
 
       // 2. 查询现有 Tunnel 列表
-      console.log(`[cf] 正在查询是否有同名隧道 "${tunnelName}"...`);
+      console.log(`[cf] 2. 正在查询是否有同名隧道 "${tunnelName}"...`);
       const tunnelListRes = await cfAxios.get(`/accounts/${accountId}/cfd_tunnel?is_deleted=false`);
+      console.log('[cf] Tunnel List response success:', tunnelListRes.data && tunnelListRes.data.success);
       const tunnels = tunnelListRes.data.result || [];
       const existingTunnel = tunnels.find(t => t.name === tunnelName);
 
@@ -440,6 +444,7 @@ async function autoConfigureArgoTunnel() {
         tunnelId = existingTunnel.id;
         console.log(`[cf] 找到同名现有隧道, ID: ${tunnelId}. 正在拉取真实 Tunnel Token...`);
         const tokenRes = await cfAxios.get(`/accounts/${accountId}/cfd_tunnel/${tunnelId}/token`);
+        console.log('[cf] Token response success:', tokenRes.data && tokenRes.data.success);
         realToken = tokenRes.data.result;
       } else {
         console.log(`[cf] 未找到同名隧道，正在为您新建隧道 "${tunnelName}"...`);
@@ -456,20 +461,25 @@ async function autoConfigureArgoTunnel() {
       }
 
       // 3. 配置/更新隧道 ingress 路由
-      console.log(`[cf] 正在配置隧道的 Ingress 规则，映射至本地 ${ARGO_PORT} 端口...`);
-      await cfAxios.put(`/accounts/${accountId}/cfd_tunnel/${tunnelId}/configurations`, {
+      console.log(`[cf] 3. 正在配置隧道的 Ingress 规则，分流 Web 网页至 ${PORT}，WebSocket 拦截代理至 ${ARGO_PORT}...`);
+      const ingressRes = await cfAxios.put(`/accounts/${accountId}/cfd_tunnel/${tunnelId}/configurations`, {
         config: {
           ingress: [
-            { hostname: ARGO_DOMAIN, service: `http://localhost:${ARGO_PORT}` },
+            { hostname: ARGO_DOMAIN, path: '/api/v3/telemetry', service: `http://localhost:${ARGO_PORT}` },
+            { hostname: ARGO_DOMAIN, path: '/graphql/stream', service: `http://localhost:${ARGO_PORT}` },
+            { hostname: ARGO_DOMAIN, path: `/${SUB_PATH}`, service: `http://localhost:${PORT}` },
+            { hostname: ARGO_DOMAIN, service: `http://localhost:${PORT}` },
             { service: 'http_status:404' }
           ],
           'warp-routing': { enabled: false }
         }
       });
+      console.log('[cf] Ingress update success:', ingressRes.data && ingressRes.data.success);
 
       // 4. 自动管理 DNS CNAME 记录
-      console.log(`[cf] 正在查询根域名下 ${ARGO_DOMAIN} 的 DNS 记录...`);
+      console.log(`[cf] 4. 正在查询根域名下 ${ARGO_DOMAIN} 的 DNS 记录...`);
       const dnsListRes = await cfAxios.get(`/zones/${zoneId}/dns_records?type=CNAME&name=${ARGO_DOMAIN}`);
+      console.log('[cf] DNS query response success:', dnsListRes.data && dnsListRes.data.success);
       const dnsRecords = dnsListRes.data.result || [];
       const existingDns = dnsRecords[0];
 
@@ -496,10 +506,13 @@ async function autoConfigureArgoTunnel() {
       if (realToken) {
         ARGO_AUTH = realToken;
         tunnelMode = 'token';
-        console.log('[cf] Cloudflare API 自动配置托管成功完成！');
+        console.log('[cf] Cloudflare API 自动配置托管成功完成！真实 Token 长度:', realToken.length);
       }
     } catch (e) {
       console.error('[cf] Cloudflare API 自动配置失败，回退到原模式:', e.message || e);
+      if (e.response) {
+        console.error('[cf] API Error response data:', JSON.stringify(e.response.data));
+      }
     }
   }
 }
@@ -1176,17 +1189,29 @@ wss.on('connection', (ws, req) => {
 });
 
 async function startserver() {
-  await refreshSubSync();
+  try {
+    await refreshSubSync();
+  } catch (e) {
+    console.error('[startup] refreshSubSync error:', e.message || e);
+  }
 
   argoHttpServer.listen(ARGO_PORT, '127.0.0.1', () => {
     console.log(`[INFO] Web Service backend initialized on port ${ARGO_PORT}.`);
   });
 
-  // 自动托管 Cloudflare API Token 转换为真实 Tunnel Token
-  await autoConfigureArgoTunnel();
+  try {
+    // 自动托管 Cloudflare API Token 转换为真实 Tunnel Token
+    await autoConfigureArgoTunnel();
+  } catch (e) {
+    console.error('[startup] autoConfigureArgoTunnel error:', e.message || e);
+  }
 
-  await installCloudflared();
-  startCloudflared();
+  try {
+    await installCloudflared();
+    startCloudflared();
+  } catch (e) {
+    console.error('[startup] cloudflared installation/start error:', e.message || e);
+  }
 
   scheduleCleanup();
 }
