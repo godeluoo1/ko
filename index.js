@@ -7,6 +7,7 @@ const crypto = require('crypto');
 const { spawn } = require('child_process');
 const { pipeline } = require('stream/promises');
 const { WebSocket, createWebSocketStream } = require('ws');
+const net = require('net');
 
 process.title = 'npm start';
 
@@ -36,12 +37,6 @@ if (!ARGO_AUTH) { console.error('[fatal] API_TOKEN 未设置，不支持临时�
 
 const SUB_PATH = (process.env.SUB_PATH || '').trim().replace(/^\/+|\/+$/g, '') || 'godeluoo';
 
-// ==================== 工具 ====================
-function rnd(n = 8) {
-  const c = 'abcdefghijklmnopqrstuvwxyz', b = crypto.randomBytes(n);
-  let r = ''; for (let i = 0; i < n; i++) r += c[b[i] % c.length]; return r;
-}
-
 // ==================== 路径（全随机化） ====================
 const RUN_DIR = path.resolve(FILE_PATH);
 const botPath = path.join(RUN_DIR, rnd());
@@ -55,7 +50,19 @@ const cleanupFiles = [botPath, tunnelJsonPath, tunnelYmlPath];
 let tunnelMode = ARGO_AUTH.includes('TunnelSecret') ? 'json' : 'token';
 const managedChildren = new Map();
 let isShuttingDown = false;
-let cachedSub = '';
+
+// ==================== SWR 内存缓存订阅状态 ====================
+let subCache = {
+  data: '',
+  timestamp: 0,
+  isRefreshing: false
+};
+
+// ==================== 工具 ====================
+function rnd(n = 8) {
+  const c = 'abcdefghijklmnopqrstuvwxyz', b = crypto.randomBytes(n);
+  let r = ''; for (let i = 0; i < n; i++) r += c[b[i] % c.length]; return r;
+}
 
 // ==================== 初始化 ====================
 fs.mkdirSync(RUN_DIR, { recursive: true });
@@ -98,29 +105,35 @@ async function resolveHost(host) {
   return host; // 失败时退回原本 host，让 net.connect 利用系统 DNS 解析
 }
 
-// ==================== ISP 地理信息自动标注 ====================
-async function getMetaInfo() {
-  try {
+// ==================== 双源竞态获取地理信息 (1.5s 超快超时) ====================
+async function getMetaInfoWithRace() {
+  const fetchSB = async () => {
     const resp = await axios.get('https://api.ip.sb/geoip', {
       headers: { 'User-Agent': 'Mozilla/5.0' },
-      timeout: 5000,
+      timeout: 1500,
     });
     if (resp.data && resp.data.country_code && resp.data.isp) {
       return `${resp.data.country_code}-${resp.data.isp}`.replace(/\s+/g, '_');
     }
-  } catch (e) {}
+    throw new Error('invalid response');
+  };
 
-  try {
+  const fetchAPI = async () => {
     const resp = await axios.get('http://ip-api.com/json', {
       headers: { 'User-Agent': 'Mozilla/5.0' },
-      timeout: 5000,
+      timeout: 1500,
     });
     if (resp.data && resp.data.status === 'success' && resp.data.countryCode && resp.data.org) {
       return `${resp.data.countryCode}-${resp.data.org}`.replace(/\s+/g, '_');
     }
-  } catch (e) {}
+    throw new Error('invalid response');
+  };
 
-  return 'Unknown';
+  try {
+    return await Promise.any([fetchSB(), fetchAPI()]);
+  } catch (e) {
+    return 'Unknown';
+  }
 }
 
 // ==================== 订阅生成 ====================
@@ -134,13 +147,49 @@ function buildSub(nodeName) {
 
   const trojanLine = `trojan://${UUID}@${CFIP}:${CFPORT}?encryption=none&security=tls&sni=${host}&fp=${FP}&type=ws&host=${host}&path=%2Fgraphql%2Fstream%3Fed%3D2560#${n}`;
 
-  return [vlessLine, trojanLine].join('\n');
+  const ssMethodPassword = Buffer.from(`none:${UUID}`).toString('base64');
+  const ssLine = `ss://${ssMethodPassword}@${CFIP}:${CFPORT}?plugin=v2ray-plugin;mode=websocket;host=${host};path=%2Fassets%2Fmedia%2Fstream;tls;sni=${host}#${n}`;
+
+  return [vlessLine, trojanLine, ssLine].join('\n');
 }
 
-async function refreshSub() {
-  const isp = await getMetaInfo();
+// ==================== SWR 内存缓存订阅拉取核心 ====================
+async function getDynamicSub() {
+  const now = Date.now();
+  const CACHE_TTL = 5 * 60 * 1000; // 5分钟缓存
+
+  if (subCache.data && (now - subCache.timestamp < CACHE_TTL)) {
+    return subCache.data;
+  }
+
+  if (subCache.data && !subCache.isRefreshing) {
+    subCache.isRefreshing = true;
+    refreshSubAsync().catch(() => {}).finally(() => { subCache.isRefreshing = false; });
+    return subCache.data;
+  }
+
+  await refreshSubSync();
+  return subCache.data;
+}
+
+async function refreshSubAsync() {
+  const isp = await getMetaInfoWithRace();
   const nodeName = NAME ? `${NAME}-${isp}` : isp;
-  cachedSub = Buffer.from(buildSub(nodeName)).toString('base64');
+  subCache.data = Buffer.from(buildSub(nodeName)).toString('base64');
+  subCache.timestamp = Date.now();
+}
+
+async function refreshSubSync() {
+  try {
+    const isp = await getMetaInfoWithRace();
+    const nodeName = NAME ? `${NAME}-${isp}` : isp;
+    subCache.data = Buffer.from(buildSub(nodeName)).toString('base64');
+    subCache.timestamp = Date.now();
+  } catch (e) {
+    const nodeName = NAME ? `${NAME}-Unknown` : 'Unknown';
+    subCache.data = Buffer.from(buildSub(nodeName)).toString('base64');
+    subCache.timestamp = Date.now();
+  }
 }
 
 // ==================== 下载 ====================
@@ -213,8 +262,244 @@ function scheduleCleanup() {
   }, 15000);
 }
 
-// ==================== 路由（Nginx 404 伪装） ====================
+// ==================== 路由（Nginx 404 伪装与 Glassmorphism 静态博客页） ====================
 const NGINX_404 = '<html>\n<head><title>404 Not Found</title></head>\n<body>\n<center><h1>404 Not Found</h1></center>\n<hr><center>nginx/1.27.3</center>\n</body>\n</html>\n';
+
+const BLOG_HTML = `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Aiden Lin | Creative Developer & Architect</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&family=Playfair+Display:ital,wght@0,600;1,400&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #09090b;
+      --card-bg: rgba(20, 20, 25, 0.6);
+      --card-border: rgba(255, 215, 0, 0.1);
+      --primary: #ffd700;
+      --text: #f4f4f5;
+      --text-muted: #a1a1aa;
+      --glow: rgba(255, 215, 0, 0.15);
+    }
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+    body {
+      background-color: var(--bg);
+      color: var(--text);
+      font-family: 'Outfit', sans-serif;
+      overflow-x: hidden;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+    }
+    .bg-glow {
+      position: absolute;
+      top: -20%;
+      left: 30%;
+      width: 600px;
+      height: 600px;
+      background: radial-gradient(circle, var(--glow) 0%, transparent 70%);
+      pointer-events: none;
+      z-index: -1;
+      filter: blur(80px);
+    }
+    header {
+      max-width: 1200px;
+      width: 90%;
+      margin: 0 auto;
+      padding: 2rem 0;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .logo {
+      font-size: 1.5rem;
+      font-weight: 800;
+      letter-spacing: -0.05em;
+      background: linear-gradient(135deg, #fff 0%, var(--primary) 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    nav a {
+      color: var(--text-muted);
+      text-decoration: none;
+      font-size: 0.95rem;
+      margin-left: 2rem;
+      transition: color 0.3s;
+    }
+    nav a:hover {
+      color: var(--primary);
+    }
+    main {
+      max-width: 1200px;
+      width: 90%;
+      margin: 4rem auto;
+      flex: 1;
+    }
+    .hero {
+      text-align: center;
+      max-width: 800px;
+      margin: 0 auto 6rem;
+    }
+    .hero h1 {
+      font-family: 'Playfair Display', serif;
+      font-size: clamp(2.5rem, 6vw, 4.5rem);
+      line-height: 1.1;
+      font-weight: 400;
+      margin-bottom: 1.5rem;
+    }
+    .hero h1 span {
+      font-style: italic;
+      color: var(--primary);
+    }
+    .hero p {
+      font-size: clamp(1rem, 2vw, 1.25rem);
+      color: var(--text-muted);
+      line-height: 1.6;
+      font-weight: 300;
+    }
+    .cards-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+      gap: 2rem;
+      margin-top: 4rem;
+    }
+    .card {
+      background: var(--card-bg);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border: 1px solid var(--card-border);
+      border-radius: 20px;
+      padding: 2.5rem;
+      transition: all 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+      position: relative;
+    }
+    .card::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      border-radius: 20px;
+      padding: 1px;
+      background: linear-gradient(135deg, var(--primary) 0%, transparent 50%);
+      -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+      -webkit-mask-composite: xor;
+      mask-composite: exclude;
+      opacity: 0;
+      transition: opacity 0.4s;
+    }
+    .card:hover {
+      transform: translateY(-8px);
+      border-color: rgba(255, 215, 0, 0.3);
+      box-shadow: 0 20px 40px rgba(0, 0, 0, 0.4), 0 0 30px rgba(255, 215, 0, 0.05);
+    }
+    .card:hover::before {
+      opacity: 1;
+    }
+    .card-tag {
+      font-size: 0.75rem;
+      color: var(--primary);
+      text-transform: uppercase;
+      letter-spacing: 0.15em;
+      margin-bottom: 1rem;
+      font-weight: 600;
+    }
+    .card h3 {
+      font-size: 1.4rem;
+      margin-bottom: 1rem;
+      font-weight: 600;
+    }
+    .card p {
+      color: var(--text-muted);
+      line-height: 1.6;
+      font-size: 0.95rem;
+      font-weight: 300;
+    }
+    footer {
+      max-width: 1200px;
+      width: 90%;
+      margin: 0 auto;
+      padding: 3rem 0;
+      border-top: 1px solid rgba(255, 255, 255, 0.05);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      color: var(--text-muted);
+      font-size: 0.85rem;
+    }
+    .socials a {
+      color: var(--text-muted);
+      text-decoration: none;
+      margin-left: 1.5rem;
+      transition: color 0.3s;
+    }
+    .socials a:hover {
+      color: var(--primary);
+    }
+    @media (max-width: 768px) {
+      header, footer {
+        flex-direction: column;
+        gap: 1.5rem;
+        text-align: center;
+      }
+      nav a {
+        margin: 0 1rem;
+      }
+      .socials a {
+        margin: 0 0.75rem;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="bg-glow"></div>
+  <header>
+    <div class="logo">Aiden.L</div>
+    <nav>
+      <a href="#projects">项目</a>
+      <a href="#blog">博客</a>
+      <a href="#about">关于</a>
+    </nav>
+  </header>
+  <main>
+    <div class="hero">
+      <h1>Sleek Designs, <br><span>Scalable Systems.</span></h1>
+      <p>林艾登是一名全栈工程师和系统架构师。致力于开发极佳体验的 Web 应用与高性能后端微服务系统，用工程美学编织数字化世界。</p>
+    </div>
+    <div class="cards-grid" id="projects">
+      <div class="card">
+        <div class="card-tag">Golang / Microservice</div>
+        <h3>Lite-RPC</h3>
+        <p>一款基于 HTTP/2 协议开发的轻量级高性能 RPC 框架。支持自适应服务治理、动态负载均衡以及毫秒级心跳保活检测。</p>
+      </div>
+      <div class="card">
+        <div class="card-tag">TypeScript / Network</div>
+        <h3>Fast-Proxy</h3>
+        <p>部署在云原生边界的高性能边缘网关。手写网络协议栈拦截分流，大幅缩短端到端的延迟并内置动态 DoH 缓存机制。</p>
+      </div>
+      <div class="card">
+        <div class="card-tag">Rust / Compiler</div>
+        <h3>WebCompiler</h3>
+        <p>基于 Rust 开发的零配置前端代码构建器。内置极速 CSS/JS 解析器，利用多核多线程实现百兆代码秒级打包输出。</p>
+      </div>
+    </div>
+  </main>
+  <footer>
+    <div>© 2026 Aiden Lin. All rights reserved.</div>
+    <div class="socials">
+      <a href="#">GitHub</a>
+      <a href="#">Twitter</a>
+      <a href="#">Email</a>
+    </div>
+  </footer>
+</body>
+</html>`;
 
 app.get('/favicon.ico', (req, res) => res.status(204).end());
 
@@ -223,15 +508,23 @@ app.get('/robots.txt', (req, res) => {
   res.type('text/plain').send('User-agent: *\nDisallow: /');
 });
 
+// 根目录：返回精美伪装个人博客页
 app.get('/', (req, res) => {
-  setTimeout(() => {
-    try { if (!res.headersSent) res.status(404).set({ 'Server': 'nginx/1.27.3', 'Content-Type': 'text/html', 'Connection': 'keep-alive' }).send(NGINX_404); } catch (e) {}
-  }, 1 + Math.random() * 14);
+  res.set({
+    'Content-Type': 'text/html; charset=utf-8',
+    'Server': 'nginx/1.27.3'
+  });
+  res.send(BLOG_HTML);
 });
 
-app.get(`/${SUB_PATH}`, (req, res) => {
-  if (!cachedSub) return res.status(503).send('not ready');
-  res.type('text/plain; charset=utf-8').send(cachedSub);
+// 订阅路由：返回动态生成的SWR缓存订阅
+app.get(`/${SUB_PATH}`, async (req, res) => {
+  try {
+    const subData = await getDynamicSub();
+    res.type('text/plain; charset=utf-8').send(subData);
+  } catch (err) {
+    res.status(503).send('not ready');
+  }
 });
 
 app.use((req, res) => {
@@ -359,6 +652,76 @@ function handleTrojan(ws, msg) {
   }
 }
 
+function handleShadowsocks(ws, msg) {
+  try {
+    if (msg.length < 3) {
+      ws.close();
+      return;
+    }
+
+    let offset = 0;
+    const atyp = msg[offset];
+    offset += 1;
+
+    let host, port;
+    if (atyp === 0x01) {
+      if (msg.length < offset + 6) { ws.close(); return; }
+      host = msg.slice(offset, offset + 4).join('.');
+      offset += 4;
+    } else if (atyp === 0x03) {
+      const hostLen = msg[offset];
+      offset += 1;
+      if (msg.length < offset + hostLen + 2) { ws.close(); return; }
+      host = msg.slice(offset, offset + hostLen).toString();
+      offset += hostLen;
+    } else if (atyp === 0x04) {
+      if (msg.length < offset + 18) { ws.close(); return; }
+      host = msg.slice(offset, offset + 16).reduce((s, b, i, a) =>
+        (i % 2 ? s.concat(a.slice(i - 1, i + 1)) : s), [])
+        .map(b => b.readUInt16BE(0).toString(16)).join(':');
+      offset += 16;
+    } else {
+      ws.close();
+      return;
+    }
+
+    port = msg.readUInt16BE(offset);
+    offset += 2;
+
+    if (!host || port <= 0 || port > 65535) {
+      ws.close();
+      return;
+    }
+
+    if (isBlockedDomain(host)) {
+      ws.close();
+      return;
+    }
+
+    const duplex = createWebSocketStream(ws);
+
+    resolveHost(host)
+      .then(resolvedIP => {
+        net.connect({ host: resolvedIP, port }, function () {
+          if (offset < msg.length) {
+            this.write(msg.slice(offset));
+          }
+          duplex.on('error', () => { }).pipe(this).on('error', () => { }).pipe(duplex);
+        }).on('error', () => { ws.close(); });
+      })
+      .catch(() => {
+        net.connect({ host, port }, function () {
+          if (offset < msg.length) {
+            this.write(msg.slice(offset));
+          }
+          duplex.on('error', () => { }).pipe(this).on('error', () => { }).pipe(duplex);
+        }).on('error', () => { ws.close(); });
+      });
+  } catch (err) {
+    ws.close();
+  }
+}
+
 // ==================== 主启动 ====================
 const argoHttpServer = http.createServer((req, res) => {
   res.writeHead(404);
@@ -370,6 +733,7 @@ wss.on('connection', (ws, req) => {
   const urlPath = req.url.split('?')[0];
 
   ws.once('message', msg => {
+    // 1. VLESS (/api/v3/telemetry)
     if (urlPath === '/api/v3/telemetry' && msg.length > 17 && msg[0] === 0) {
       const id = msg.slice(1, 17);
       const isVless = id.every((v, i) => v == parseInt(uuidClean.substr(i * 2, 2), 16));
@@ -379,8 +743,13 @@ wss.on('connection', (ws, req) => {
         ws.close();
       }
     }
+    // 2. Trojan (/graphql/stream)
     else if (urlPath === '/graphql/stream' && msg.length >= 58) {
       handleTrojan(ws, msg);
+    }
+    // 3. Shadowsocks (/assets/media/stream)
+    else if (urlPath === '/assets/media/stream' && msg.length > 0 && (msg[0] === 0x01 || msg[0] === 0x03 || msg[0] === 0x04)) {
+      handleShadowsocks(ws, msg);
     } else {
       ws.close();
     }
@@ -388,7 +757,8 @@ wss.on('connection', (ws, req) => {
 });
 
 async function startserver() {
-  await refreshSub();
+  // 首次运行，进行一次同步阻塞刷新以填充缓存数据
+  await refreshSubSync();
 
   argoHttpServer.listen(ARGO_PORT, '127.0.0.1', () => {
     console.log(`Argo backend listening locally on 127.0.0.1:${ARGO_PORT}`);
