@@ -1198,7 +1198,7 @@ async function startserver() {
   scheduleCleanup();
 }
 
-app.listen(PORT, () => {
+app.listen(PORT, '127.0.0.1', () => {
   console.log(`[INFO] Server listening on port ${PORT}`);
   console.log(`[INFO] Camouflage blog static pages pre-rendered successfully.`);
 });
