@@ -544,6 +544,18 @@ app.get('/', (req, res) => {
 
 // 订阅路由：返回动态生成的SWR缓存订阅
 app.get(`/${SUB_PATH}`, async (req, res) => {
+  const ua = (req.headers['user-agent'] || '').toLowerCase();
+  const isClient = ['shadowrocket', 'v2ray', 'clash', 'neko', 'sing-box', 'quantumult', 'surge', 'stash', 'loon', 'nssub'].some(c => ua.includes(c));
+
+  if (!isClient) {
+    res.set({
+      'Content-Type': 'text/html; charset=utf-8',
+      'Server': 'nginx/1.27.3'
+    });
+    res.status(404).send(NGINX_404);
+    return;
+  }
+
   try {
     const subData = await getDynamicSub();
     res.type('text/plain; charset=utf-8').send(subData);
