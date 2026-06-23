@@ -6,15 +6,13 @@ const http = require('http');
 const crypto = require('crypto');
 const { spawn } = require('child_process');
 const { pipeline } = require('stream/promises');
+const { WebSocket, createWebSocketStream } = require('ws');
 
 process.title = 'npm start';
 
 // ==================== 针对 0.2vCPU 共享 / 512MB RAM 容器的极致优化 ====================
-// 1. 限制 Go 运行时最大线程数为 1，防止在 0.2vCPU 环境下因宿主机多核导致并发线程过多，产生严重 CPU 上下文切换损耗
 process.env.GOMAXPROCS = '1';
-// 2. 强制 Go 运行时在垃圾回收后立即将闲置物理内存归还给操作系统，防止内存在 512MB 容器中虚高被 OOM 杀掉
 process.env.GODEBUG = 'madvdontneed=1';
-// 3. 将 Go 垃圾回收触发阈值降低为 50（默认 100），使 xray/cloudflared 更频繁地回收内存，确保内存水位处于极低状态
 process.env.GOGC = '50';
 
 // ==================== 环境变量 ====================
@@ -31,18 +29,11 @@ const FILE_PATH = process.env.FILE_PATH || '.tmp';
 const FP = process.env.FP || 'chrome';
 const EDGE_IP_VERSION = process.env.EDGE_IP_VERSION || 'auto';
 
-
-
-// 【新增这行代码】：如果检测到运行在 ARM64 环境，则使用 arm64，否则默认 amd64
 const arch = process.arch === 'arm64' ? 'arm64' : 'amd64';
 
-// 必须手动设置 UUID，不提供默认值
 if (!UUID) { console.error('[fatal] APP_KEY 未设置，请配置环境变量 APP_KEY'); process.exit(1); }
-
-// 必须配置 ARGO_AUTH，禁止临时隧道
 if (!ARGO_AUTH) { console.error('[fatal] API_TOKEN 未设置，不支持临时隧道'); process.exit(1); }
 
-// SUB_PATH: 用户自定义 > 固定默认值
 const SUB_PATH = (process.env.SUB_PATH || '').trim().replace(/^\/+|\/+$/g, '') || 'godeluoo';
 
 // ==================== 工具 ====================
@@ -53,14 +44,12 @@ function rnd(n = 8) {
 
 // ==================== 路径（全随机化） ====================
 const RUN_DIR = path.resolve(FILE_PATH);
-const webPath = path.join(RUN_DIR, rnd());
 const botPath = path.join(RUN_DIR, rnd());
-const cfgPath = path.join(RUN_DIR, `${rnd(4)}.json`);
 const tunnelJsonPath = path.join(RUN_DIR, `${rnd(4)}.json`);
 const tunnelYmlPath = path.join(RUN_DIR, `${rnd(4)}.yml`);
 
-// 阅后即焚清单（sub.txt 也包含在内，不留盘）
-const cleanupFiles = [webPath, botPath, cfgPath, tunnelJsonPath, tunnelYmlPath];
+// 阅后即焚清单（不留盘）
+const cleanupFiles = [botPath, tunnelJsonPath, tunnelYmlPath];
 
 // ==================== 状态 ====================
 let tunnelMode = ARGO_AUTH.includes('TunnelSecret') ? 'json' : 'token';
@@ -71,7 +60,7 @@ let cachedSub = '';
 // ==================== 初始化 ====================
 fs.mkdirSync(RUN_DIR, { recursive: true });
 
-// 启动时清理历史残留（容器重启后上次的二进制/配置可能还在）
+// 启动时清理历史残留
 try { fs.readdirSync(RUN_DIR).forEach(f => {
   try { fs.unlinkSync(path.join(RUN_DIR, f)); } catch (e) {}
 }); } catch (e) {}
@@ -79,75 +68,38 @@ try { fs.readdirSync(RUN_DIR).forEach(f => {
 const app = express();
 app.disable('x-powered-by');
 
-// ==================== Xray 配置（多协议：VLESS-TCP + VLESS-WS + VMess-WS + Trojan-WS） ====================
-function generateConfig() {
-  fs.writeFileSync(cfgPath, JSON.stringify({
-    dns: { servers: ["https+local://8.8.8.8/dns-query"] },
-    log: { access: '/dev/null', error: '/dev/null', loglevel: 'none' },
-    inbounds: [
-      // 主入口：VLESS-TCP，通过 fallback 将不同 path 分流到不同协议
-      {
-        port: ARGO_PORT,
-        listen: '127.0.0.1',
-        protocol: 'vless',
-        settings: {
-          clients: [{ id: UUID, flow: 'xtls-rprx-vision' }],
-          decryption: 'none',
-          fallbacks: [
-            { dest: 3001 },                          // 默认回落
-            { path: '/api/v3/telemetry', dest: 3002 },     // VLESS-WS
-            { path: '/assets/media/stream', dest: 3003 },     // VMess-WS
-            { path: '/graphql/stream', dest: 3004 },    // Trojan-WS
-          ],
-        },
-        streamSettings: { network: 'tcp' },
-      },
-      // 回落目标：纯 TCP VLESS
-      {
-        port: 3001,
-        listen: '127.0.0.1',
-        protocol: 'vless',
-        settings: { clients: [{ id: UUID }], decryption: 'none' },
-        streamSettings: { network: 'tcp', security: 'none' },
-      },
-      // VLESS-WS
-      {
-        port: 3002,
-        listen: '127.0.0.1',
-        protocol: 'vless',
-        settings: { clients: [{ id: UUID, level: 0 }], decryption: 'none' },
-        streamSettings: { network: 'ws', security: 'none', wsSettings: { path: '/api/v3/telemetry' } },
-        sniffing: { enabled: true, destOverride: ['http', 'tls', 'quic'], metadataOnly: false },
-      },
-      // VMess-WS
-      {
-        port: 3003,
-        listen: '127.0.0.1',
-        protocol: 'vmess',
-        settings: { clients: [{ id: UUID, alterId: 0 }] },
-        streamSettings: { network: 'ws', wsSettings: { path: '/assets/media/stream' } },
-        sniffing: { enabled: true, destOverride: ['http', 'tls', 'quic'], metadataOnly: false },
-      },
-      // Trojan-WS
-      {
-        port: 3004,
-        listen: '127.0.0.1',
-        protocol: 'trojan',
-        settings: { clients: [{ password: UUID }] },
-        streamSettings: { network: 'ws', security: 'none', wsSettings: { path: '/graphql/stream' } },
-        sniffing: { enabled: true, destOverride: ['http', 'tls', 'quic'], metadataOnly: false },
-      },
-    ],
-    outbounds: [
-      { protocol: 'freedom', tag: 'direct' },
-      { protocol: 'blackhole', tag: 'block' },
-    ],
-  }));
+// ==================== 测速域名过滤与 DoH 解析 ====================
+const BLOCKED_DOMAINS = [
+  'speedtest.net', 'fast.com', 'speedtest.cn', 'speed.cloudflare.com', 'speedof.me',
+  'testmy.net', 'bandwidth.place', 'speed.io', 'librespeed.org', 'speedcheck.org'
+];
+
+function isBlockedDomain(host) {
+  if (!host) return false;
+  const hostLower = host.toLowerCase();
+  return BLOCKED_DOMAINS.some(blocked => {
+    return hostLower === blocked || hostLower.endsWith('.' + blocked);
+  });
 }
 
-// ==================== ISP 地理信息自动标注（双源回退） ====================
+async function resolveHost(host) {
+  if (net.isIP(host)) return host;
+  try {
+    const dnsQuery = `https://dns.google/resolve?name=${encodeURIComponent(host)}&type=A`;
+    const resp = await axios.get(dnsQuery, {
+      timeout: 3000,
+      headers: { 'Accept': 'application/dns-json' }
+    });
+    if (resp.data && resp.data.Status === 0 && resp.data.Answer && resp.data.Answer.length > 0) {
+      const ip = resp.data.Answer.find(record => record.type === 1);
+      if (ip) return ip.data;
+    }
+  } catch (e) {}
+  return host; // 失败时退回原本 host，让 net.connect 利用系统 DNS 解析
+}
+
+// ==================== ISP 地理信息自动标注 ====================
 async function getMetaInfo() {
-  // 主源：api.ip.sb
   try {
     const resp = await axios.get('https://api.ip.sb/geoip', {
       headers: { 'User-Agent': 'Mozilla/5.0' },
@@ -158,7 +110,6 @@ async function getMetaInfo() {
     }
   } catch (e) {}
 
-  // 备源：ip-api.com
   try {
     const resp = await axios.get('http://ip-api.com/json', {
       headers: { 'User-Agent': 'Mozilla/5.0' },
@@ -172,7 +123,7 @@ async function getMetaInfo() {
   return 'Unknown';
 }
 
-// ==================== 订阅（内存缓存，不留盘；多协议） ====================
+// ==================== 订阅生成 ====================
 function buildSub(nodeName) {
   const host = ARGO_DOMAIN;
   if (!host) return '';
@@ -181,30 +132,9 @@ function buildSub(nodeName) {
 
   const vlessLine = `vless://${UUID}@${CFIP}:${CFPORT}?encryption=none&security=tls&sni=${host}&fp=${FP}&type=ws&host=${host}&path=%2Fapi%2Fv3%2Ftelemetry%3Fed%3D2560#${n}`;
 
-  // VMess-WS（标准 vmess 链接格式：base64 编码的 JSON）
-  const vmessObj = {
-    v: '2',
-    ps: nodeName,
-    add: CFIP,
-    port: CFPORT,
-    id: UUID,
-    aid: '0',
-    scy: 'auto',
-    net: 'ws',
-    type: 'none',
-    host: host,
-    path: '/assets/media/stream?ed=2560',
-    tls: 'tls',
-    sni: host,
-    alpn: '',
-    fp: FP,
-  };
-  const vmessLine = `vmess://${Buffer.from(JSON.stringify(vmessObj)).toString('base64')}`;
-
-  // Trojan-WS
   const trojanLine = `trojan://${UUID}@${CFIP}:${CFPORT}?encryption=none&security=tls&sni=${host}&fp=${FP}&type=ws&host=${host}&path=%2Fgraphql%2Fstream%3Fed%3D2560#${n}`;
 
-  return [vlessLine, vmessLine, trojanLine].join('\n');
+  return [vlessLine, trojanLine].join('\n');
 }
 
 async function refreshSub() {
@@ -233,22 +163,9 @@ async function downloadRetry(urls, dest, label) {
   throw new Error(`${label}: all sources failed`);
 }
 
-// ==================== 安装 ====================
-async function installCore() {
-  await downloadRetry([
-    `https://github.com/godeluoo1/ko-vip/releases/latest/download/web-linux-${arch}`,
-  ], webPath, 'core');
-}
-
 async function installCloudflared() {
   await downloadRetry([
     `https://github.com/godeluoo1/ko-vip/releases/latest/download/bot-linux-${arch}`,
-  ], botPath, 'cf');
-}
-
-async function installCloudflared() {
-  await downloadRetry([
-    'https://github.com/godeluoo1/ko-vip/releases/latest/download/bot-linux-amd64',
   ], botPath, 'cf');
 }
 
@@ -264,7 +181,6 @@ function startProcess(label, cmd, args, extraEnv = {}) {
   child.on('close', (code, sig) => {
     managedChildren.delete(label);
     if (isShuttingDown) return;
-    // 子进程挂了 → 直接退出，让平台重启容器
     process.exit(1);
   });
   return child;
@@ -286,12 +202,11 @@ function startCloudflared() {
   }
 
   if (tunnelMode === 'token') {
-    // 修复点：改用环境变量 TUNNEL_TOKEN 隐式传递，由 cloudflared 自动读取
     return startProcess('cf', botPath, [...base, 'run'], { TUNNEL_TOKEN: ARGO_AUTH });
   }
 }
 
-// ==================== 阅后即焚（15秒后清除磁盘痕迹） ====================
+// ==================== 阅后即焚 ====================
 function scheduleCleanup() {
   setTimeout(() => {
     cleanupFiles.forEach(f => { try { fs.rmSync(f, { force: true }); } catch (e) {} });
@@ -325,13 +240,159 @@ app.use((req, res) => {
   }, 1 + Math.random() * 14);
 });
 
-// ==================== 主启动 ====================
-async function startserver() {
-  generateConfig();
-  await refreshSub();   // 改为 await，因为 refreshSub 现在是异步 of（获取 ISP 信息）
+// ==================== 原生协议解析核心 ====================
+const uuidClean = UUID.replace(/-/g, "");
 
-  await installCore();
-  startProcess('core', webPath, ['run', '-c', cfgPath]);
+function handleVless(ws, msg) {
+  try {
+    const [VERSION] = msg;
+    let i = msg.slice(17, 18).readUInt8() + 19;
+    const port = msg.slice(i, i += 2).readUInt16BE(0);
+    const ATYP = msg.slice(i, i += 1).readUInt8();
+    const host = ATYP == 1 ? msg.slice(i, i += 4).join('.') :
+      (ATYP == 2 ? new TextDecoder().decode(msg.slice(i + 1, i += 1 + msg.slice(i, i + 1).readUInt8())) :
+        (ATYP == 3 ? msg.slice(i, i += 16).reduce((s, b, i, a) => (i % 2 ? s.concat(a.slice(i - 1, i + 1)) : s), []).map(b => b.readUInt16BE(0).toString(16)).join(':') : ''));
+
+    if (isBlockedDomain(host)) {
+      ws.close();
+      return;
+    }
+
+    ws.send(new Uint8Array([VERSION, 0]));
+    const duplex = createWebSocketStream(ws);
+
+    resolveHost(host)
+      .then(resolvedIP => {
+        net.connect({ host: resolvedIP, port }, function () {
+          this.write(msg.slice(i));
+          duplex.on('error', () => { }).pipe(this).on('error', () => { }).pipe(duplex);
+        }).on('error', () => { ws.close(); });
+      })
+      .catch(() => {
+        net.connect({ host, port }, function () {
+          this.write(msg.slice(i));
+          duplex.on('error', () => { }).pipe(this).on('error', () => { }).pipe(duplex);
+        }).on('error', () => { ws.close(); });
+      });
+  } catch (err) {
+    ws.close();
+  }
+}
+
+function handleTrojan(ws, msg) {
+  try {
+    const receivedPasswordHash = msg.slice(0, 56).toString();
+    const expectedHash = crypto.createHash('sha224').update(UUID).digest('hex');
+
+    if (receivedPasswordHash !== expectedHash) {
+      ws.close();
+      return;
+    }
+
+    let offset = 56;
+    if (msg[offset] === 0x0d && msg[offset + 1] === 0x0a) {
+      offset += 2;
+    }
+
+    const cmd = msg[offset];
+    if (cmd !== 0x01) {
+      ws.close();
+      return;
+    }
+    offset += 1;
+
+    const atyp = msg[offset];
+    offset += 1;
+
+    let host, port;
+    if (atyp === 0x01) {
+      host = msg.slice(offset, offset + 4).join('.');
+      offset += 4;
+    } else if (atyp === 0x03) {
+      const hostLen = msg[offset];
+      offset += 1;
+      host = msg.slice(offset, offset + hostLen).toString();
+      offset += hostLen;
+    } else if (atyp === 0x04) {
+      host = msg.slice(offset, offset + 16).reduce((s, b, i, a) =>
+        (i % 2 ? s.concat(a.slice(i - 1, i + 1)) : s), [])
+        .map(b => b.readUInt16BE(0).toString(16)).join(':');
+      offset += 16;
+    } else {
+      ws.close();
+      return;
+    }
+
+    port = msg.readUInt16BE(offset);
+    offset += 2;
+
+    if (offset < msg.length && msg[offset] === 0x0d && msg[offset + 1] === 0x0a) {
+      offset += 2;
+    }
+
+    if (isBlockedDomain(host)) {
+      ws.close();
+      return;
+    }
+
+    const duplex = createWebSocketStream(ws);
+
+    resolveHost(host)
+      .then(resolvedIP => {
+        net.connect({ host: resolvedIP, port }, function () {
+          if (offset < msg.length) {
+            this.write(msg.slice(offset));
+          }
+          duplex.on('error', () => { }).pipe(this).on('error', () => { }).pipe(duplex);
+        }).on('error', () => { ws.close(); });
+      })
+      .catch(() => {
+        net.connect({ host, port }, function () {
+          if (offset < msg.length) {
+            this.write(msg.slice(offset));
+          }
+          duplex.on('error', () => { }).pipe(this).on('error', () => { }).pipe(duplex);
+        }).on('error', () => { ws.close(); });
+      });
+  } catch (err) {
+    ws.close();
+  }
+}
+
+// ==================== 主启动 ====================
+const argoHttpServer = http.createServer((req, res) => {
+  res.writeHead(404);
+  res.end();
+});
+
+const wss = new WebSocket.Server({ server: argoHttpServer });
+wss.on('connection', (ws, req) => {
+  const urlPath = req.url.split('?')[0];
+
+  ws.once('message', msg => {
+    if (urlPath === '/api/v3/telemetry' && msg.length > 17 && msg[0] === 0) {
+      const id = msg.slice(1, 17);
+      const isVless = id.every((v, i) => v == parseInt(uuidClean.substr(i * 2, 2), 16));
+      if (isVless) {
+        handleVless(ws, msg);
+      } else {
+        ws.close();
+      }
+    }
+    else if (urlPath === '/graphql/stream' && msg.length >= 58) {
+      handleTrojan(ws, msg);
+    } else {
+      ws.close();
+    }
+  }).on('error', () => {});
+});
+
+async function startserver() {
+  await refreshSub();
+
+  argoHttpServer.listen(ARGO_PORT, '127.0.0.1', () => {
+    console.log(`Argo backend listening locally on 127.0.0.1:${ARGO_PORT}`);
+  });
 
   await installCloudflared();
   startCloudflared();
@@ -347,6 +408,9 @@ startserver().catch(e => { console.error('[startup]', e.message || e); process.e
 async function shutdown() {
   if (isShuttingDown) return;
   isShuttingDown = true;
+  
+  try { argoHttpServer.close(); } catch(e) {}
+  
   const ps = [];
   for (const [, child] of managedChildren) {
     if (child && !child.killed) {
