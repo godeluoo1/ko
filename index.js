@@ -8,6 +8,7 @@ const { spawn } = require('child_process');
 const { pipeline } = require('stream/promises');
 const { WebSocket, createWebSocketStream } = require('ws');
 const net = require('net');
+const dgram = require('dgram');
 
 process.title = 'npm start';
 
@@ -57,6 +58,21 @@ let subCache = {
   timestamp: 0,
   isRefreshing: false
 };
+
+// ==================== 主动内存垃圾回收 (GC节流器) ====================
+let lastGCTime = 0;
+function throttleGC() {
+  if (typeof global.gc === 'function') {
+    const now = Date.now();
+    // 限制每 30 秒执行一次 GC，防止过于频繁消耗 CPU 算力
+    if (now - lastGCTime > 30000) {
+      try {
+        global.gc();
+        lastGCTime = now;
+      } catch (e) {}
+    }
+  }
+}
 
 // ==================== 工具 ====================
 function rnd(n = 8) {
@@ -527,11 +543,20 @@ app.get(`/${SUB_PATH}`, async (req, res) => {
   }
 });
 
-app.use((req, res) => {
+// ==================== 主动探测伪装阻断 ====================
+function rejectConnection(ws) {
+  const delay = 150 + Math.floor(Math.random() * 450); // 随机 150ms~600ms 延迟
   setTimeout(() => {
-    try { if (!res.headersSent) res.status(404).set({ 'Server': 'nginx/1.27.3', 'Content-Type': 'text/html', 'Connection': 'keep-alive' }).send(NGINX_404); } catch (e) {}
-  }, 1 + Math.random() * 14);
-});
+    try {
+      if (ws.readyState === WebSocket.OPEN) {
+        // 模仿发送一段看似正常的网页响应数据给探测器，再强制断开
+        ws.send(Buffer.from("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\nServer: nginx/1.27.3\r\n\r\n" + BLOG_HTML));
+        ws.close();
+      }
+    } catch (e) {}
+    throttleGC();
+  }, delay);
+}
 
 // ==================== 原生协议解析核心 ====================
 const uuidClean = UUID.replace(/-/g, "");
@@ -572,13 +597,85 @@ function handleVless(ws, msg) {
   }
 }
 
+// 原生安全 UDP 转发
+function handleVlessUdp(ws, initialMsg, offset, host, port) {
+  try {
+    if (isBlockedDomain(host) || port === 53) {
+      ws.close();
+      return;
+    }
+
+    ws.send(new Uint8Array([0, 0])); // 握手成功响应
+
+    const udpSocket = dgram.createSocket('udp4');
+    const duplex = createWebSocketStream(ws);
+
+    resolveHost(host)
+      .then(resolvedIP => {
+        udpSocket.connect(port, resolvedIP, () => {
+          if (offset < initialMsg.length) {
+            const payload = stripUdpHeader(initialMsg.slice(offset));
+            if (payload && payload.length > 0) udpSocket.send(payload);
+          }
+        });
+      })
+      .catch(() => {
+        udpSocket.connect(port, host, () => {
+          if (offset < initialMsg.length) {
+            const payload = stripUdpHeader(initialMsg.slice(offset));
+            if (payload && payload.length > 0) udpSocket.send(payload);
+          }
+        });
+      });
+
+    function stripUdpHeader(buf) {
+      if (buf.length < 2) return null;
+      const len = buf.readUInt16BE(0);
+      return buf.slice(2, 2 + len);
+    }
+
+    duplex.on('data', chunk => {
+      let pos = 0;
+      while (pos < chunk.length) {
+        if (chunk.length - pos < 2) break;
+        const len = chunk.readUInt16BE(pos);
+        if (chunk.length - pos < 2 + len) break;
+        const payload = chunk.slice(pos + 2, pos + 2 + len);
+        udpSocket.send(payload);
+        pos += 2 + len;
+      }
+    });
+
+    udpSocket.on('message', msg => {
+      if (ws.readyState === WebSocket.OPEN) {
+        const header = Buffer.alloc(2);
+        header.writeUInt16BE(msg.length, 0);
+        ws.send(Buffer.concat([header, msg]), { binary: true });
+      }
+    });
+
+    const cleanup = () => {
+      try { udpSocket.close(); } catch(e) {}
+      ws.close();
+      throttleGC();
+    };
+
+    udpSocket.on('error', cleanup);
+    udpSocket.on('close', cleanup);
+    duplex.on('error', cleanup);
+    duplex.on('close', cleanup);
+  } catch (err) {
+    ws.close();
+  }
+}
+
 function handleTrojan(ws, msg) {
   try {
     const receivedPasswordHash = msg.slice(0, 56).toString();
     const expectedHash = crypto.createHash('sha224').update(UUID).digest('hex');
 
     if (receivedPasswordHash !== expectedHash) {
-      ws.close();
+      rejectConnection(ws);
       return;
     }
 
@@ -589,7 +686,7 @@ function handleTrojan(ws, msg) {
 
     const cmd = msg[offset];
     if (cmd !== 0x01) {
-      ws.close();
+      rejectConnection(ws);
       return;
     }
     offset += 1;
@@ -612,7 +709,7 @@ function handleTrojan(ws, msg) {
         .map(b => b.readUInt16BE(0).toString(16)).join(':');
       offset += 16;
     } else {
-      ws.close();
+      rejectConnection(ws);
       return;
     }
 
@@ -655,7 +752,7 @@ function handleTrojan(ws, msg) {
 function handleShadowsocks(ws, msg) {
   try {
     if (msg.length < 3) {
-      ws.close();
+      rejectConnection(ws);
       return;
     }
 
@@ -665,23 +762,23 @@ function handleShadowsocks(ws, msg) {
 
     let host, port;
     if (atyp === 0x01) {
-      if (msg.length < offset + 6) { ws.close(); return; }
+      if (msg.length < offset + 6) { rejectConnection(ws); return; }
       host = msg.slice(offset, offset + 4).join('.');
       offset += 4;
     } else if (atyp === 0x03) {
       const hostLen = msg[offset];
       offset += 1;
-      if (msg.length < offset + hostLen + 2) { ws.close(); return; }
+      if (msg.length < offset + hostLen + 2) { rejectConnection(ws); return; }
       host = msg.slice(offset, offset + hostLen).toString();
       offset += hostLen;
     } else if (atyp === 0x04) {
-      if (msg.length < offset + 18) { ws.close(); return; }
+      if (msg.length < offset + 18) { rejectConnection(ws); return; }
       host = msg.slice(offset, offset + 16).reduce((s, b, i, a) =>
         (i % 2 ? s.concat(a.slice(i - 1, i + 1)) : s), [])
         .map(b => b.readUInt16BE(0).toString(16)).join(':');
       offset += 16;
     } else {
-      ws.close();
+      rejectConnection(ws);
       return;
     }
 
@@ -689,7 +786,7 @@ function handleShadowsocks(ws, msg) {
     offset += 2;
 
     if (!host || port <= 0 || port > 65535) {
-      ws.close();
+      rejectConnection(ws);
       return;
     }
 
@@ -723,9 +820,17 @@ function handleShadowsocks(ws, msg) {
 }
 
 // ==================== 主启动 ====================
+// 探测防御：接管普通HTTP GET请求，重定向或返回网页伪装
 const argoHttpServer = http.createServer((req, res) => {
-  res.writeHead(404);
-  res.end();
+  const urlPath = req.url.split('?')[0];
+  if (['/api/v3/telemetry', '/graphql/stream', '/assets/media/stream'].includes(urlPath)) {
+    // 302重定向至PORT
+    res.writeHead(302, { 'Location': '/' });
+    res.end();
+  } else {
+    res.writeHead(404, { 'Server': 'nginx/1.27.3', 'Content-Type': 'text/html; charset=utf-8' });
+    res.end(NGINX_404);
+  }
 });
 
 const wss = new WebSocket.Server({ server: argoHttpServer });
@@ -737,10 +842,26 @@ wss.on('connection', (ws, req) => {
     if (urlPath === '/api/v3/telemetry' && msg.length > 17 && msg[0] === 0) {
       const id = msg.slice(1, 17);
       const isVless = id.every((v, i) => v == parseInt(uuidClean.substr(i * 2, 2), 16));
-      if (isVless) {
-        handleVless(ws, msg);
+      if (!isVless) {
+        rejectConnection(ws);
+        return;
+      }
+      
+      // 读取 VLESS 传输命令（cmd == 0x01 代表 TCP, cmd == 0x02 代表 UDP）
+      let i = msg.slice(17, 18).readUInt8() + 19;
+      const cmd = msg[i];
+      i++;
+      
+      const port = msg.slice(i, i += 2).readUInt16BE(0);
+      const ATYP = msg.slice(i, i += 1).readUInt8();
+      const host = ATYP == 1 ? msg.slice(i, i += 4).join('.') :
+        (ATYP == 2 ? new TextDecoder().decode(msg.slice(i + 1, i += 1 + msg.slice(i, i + 1).readUInt8())) :
+          (ATYP == 3 ? msg.slice(i, i += 16).reduce((s, b, i, a) => (i % 2 ? s.concat(a.slice(i - 1, i + 1)) : s), []).map(b => b.readUInt16BE(0).toString(16)).join(':') : ''));
+      
+      if (cmd === 0x02) {
+        handleVlessUdp(ws, msg, i, host, port);
       } else {
-        ws.close();
+        handleVless(ws, msg);
       }
     }
     // 2. Trojan (/graphql/stream)
@@ -751,13 +872,14 @@ wss.on('connection', (ws, req) => {
     else if (urlPath === '/assets/media/stream' && msg.length > 0 && (msg[0] === 0x01 || msg[0] === 0x03 || msg[0] === 0x04)) {
       handleShadowsocks(ws, msg);
     } else {
-      ws.close();
+      rejectConnection(ws);
     }
   }).on('error', () => {});
+  
+  ws.on('close', throttleGC);
 });
 
 async function startserver() {
-  // 首次运行，进行一次同步阻塞刷新以填充缓存数据
   await refreshSubSync();
 
   argoHttpServer.listen(ARGO_PORT, '127.0.0.1', () => {
