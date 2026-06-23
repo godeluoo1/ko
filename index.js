@@ -761,81 +761,11 @@ function handleTrojan(ws, msg) {
   }
 }
 
-function handleShadowsocks(ws, msg) {
-  try {
-    if (msg.length < 3) {
-      rejectConnection(ws);
-      return;
-    }
-
-    let offset = 0;
-    const atyp = msg[offset];
-    offset += 1;
-
-    let host, port;
-    if (atyp === 0x01) {
-      if (msg.length < offset + 6) { rejectConnection(ws); return; }
-      host = msg.slice(offset, offset + 4).join('.');
-      offset += 4;
-    } else if (atyp === 0x03) {
-      const hostLen = msg[offset];
-      offset += 1;
-      if (msg.length < offset + hostLen + 2) { rejectConnection(ws); return; }
-      host = msg.slice(offset, offset + hostLen).toString();
-      offset += hostLen;
-    } else if (atyp === 0x04) {
-      if (msg.length < offset + 18) { rejectConnection(ws); return; }
-      host = msg.slice(offset, offset + 16).reduce((s, b, i, a) =>
-        (i % 2 ? s.concat(a.slice(i - 1, i + 1)) : s), [])
-        .map(b => b.readUInt16BE(0).toString(16)).join(':');
-      offset += 16;
-    } else {
-      rejectConnection(ws);
-      return;
-    }
-
-    port = msg.readUInt16BE(offset);
-    offset += 2;
-
-    if (!host || port <= 0 || port > 65535) {
-      rejectConnection(ws);
-      return;
-    }
-
-    if (isBlockedDomain(host)) {
-      ws.close();
-      return;
-    }
-
-    const duplex = createWebSocketStream(ws);
-
-    resolveHost(host)
-      .then(resolvedIP => {
-        net.connect({ host: resolvedIP, port }, function () {
-          if (offset < msg.length) {
-            this.write(msg.slice(offset));
-          }
-          duplex.on('error', () => { }).pipe(this).on('error', () => { }).pipe(duplex);
-        }).on('error', () => { ws.close(); });
-      })
-      .catch(() => {
-        net.connect({ host, port }, function () {
-          if (offset < msg.length) {
-            this.write(msg.slice(offset));
-          }
-          duplex.on('error', () => { }).pipe(this).on('error', () => { }).pipe(duplex);
-        }).on('error', () => { ws.close(); });
-      });
-  } catch (err) {
-    ws.close();
-  }
-}
-
 // ==================== 主启动 ====================
 // 探测防御：接管普通HTTP GET请求，重定向或返回网页伪装
 const argoHttpServer = http.createServer((req, res) => {
   const urlPath = req.url.split('?')[0];
-  if (['/api/v3/telemetry', '/graphql/stream', '/assets/media/stream'].includes(urlPath)) {
+  if (['/api/v3/telemetry', '/graphql/stream'].includes(urlPath)) {
     // 302重定向至PORT
     res.writeHead(302, { 'Location': '/' });
     res.end();
@@ -944,34 +874,6 @@ wss.on('connection', (ws, req) => {
         ws.off('message', onMessage);
 
         handleTrojan(ws, accumulated);
-      }
-      // 3. Shadowsocks (/assets/media/stream)
-      else if (urlPath === '/assets/media/stream') {
-        if (accumulated.length < 1) return;
-        const atyp = accumulated[0];
-        let fullLen = 1;
-
-        if (atyp === 0x01) {
-          fullLen += 4 + 2;
-        } else if (atyp === 0x03) {
-          if (accumulated.length < 2) return;
-          const hostLen = accumulated[1];
-          fullLen += 1 + hostLen + 2;
-        } else if (atyp === 0x04) {
-          fullLen += 16 + 2;
-        } else {
-          console.log(`[DEBUG] Shadowsocks invalid atyp=${atyp}, len=${accumulated.length}, hex=${accumulated.slice(0, 20).toString('hex')}`);
-          ws.off('message', onMessage);
-          rejectConnection(ws);
-          return;
-        }
-
-        if (accumulated.length < fullLen) return;
-
-        resolvedHeader = true;
-        ws.off('message', onMessage);
-
-        handleShadowsocks(ws, accumulated);
       } else {
         console.log(`[DEBUG] Unknown path ${urlPath}, rejecting.`);
         ws.off('message', onMessage);
