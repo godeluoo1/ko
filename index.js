@@ -165,12 +165,12 @@ function buildSub(nodeName) {
   const nTls = encodeURIComponent(`${nodeName}-TLS`);
   const nNoTls = encodeURIComponent(`${nodeName}-NoTLS`);
 
-  // 1. 带 TLS (端口 443, 强加密, 支持 0-RTT, 多路复用和 uTLS 伪装)
-  const vlessTls = `vless://${UUID}@${CFIP}:${CFPORT}?encryption=none&security=tls&sni=${host}&fp=${FP}&type=ws&host=${host}&path=%2Fapi%2Fv3%2Ftelemetry&ed=2560&mux=1#${nTls}`;
-  const trojanTls = `trojan://${UUID}@${CFIP}:${CFPORT}?encryption=none&security=tls&sni=${host}&fp=${FP}&type=ws&host=${host}&path=%2Fgraphql%2Fstream&ed=2560&mux=1#${nTls}`;
+  // 1. 带 TLS (端口 443, 强加密, 支持 0-RTT, uTLS 伪装)
+  const vlessTls = `vless://${UUID}@${CFIP}:${CFPORT}?encryption=none&security=tls&sni=${host}&fp=${FP}&type=ws&host=${host}&path=%2Fapi%2Fv3%2Ftelemetry&ed=2560#${nTls}`;
+  const trojanTls = `trojan://${UUID}@${CFIP}:${CFPORT}?encryption=none&security=tls&sni=${host}&fp=${FP}&type=ws&host=${host}&path=%2Fgraphql%2Fstream&ed=2560#${nTls}`;
 
-  // 2. 不带 TLS (端口 80, 无 TLS 握手开销, 极速测速, 支持 0-RTT, 多路复用)
-  const vlessNoTls = `vless://${UUID}@${CFIP}:80?encryption=none&security=none&type=ws&host=${host}&path=%2Fapi%2Fv3%2Ftelemetry&ed=2560&mux=1#${nNoTls}`;
+  // 2. 不带 TLS (端口 80, 无 TLS 握手开销, 极速测速, 支持 0-RTT)
+  const vlessNoTls = `vless://${UUID}@${CFIP}:80?encryption=none&security=none&type=ws&host=${host}&path=%2Fapi%2Fv3%2Ftelemetry&ed=2560#${nNoTls}`;
 
   return [
     vlessTls, trojanTls,
@@ -214,12 +214,6 @@ proxies:
         Host: ${host}
       max-early-data: 2560
       early-data-header-name: Sec-WebSocket-Protocol
-    smux:
-      enabled: true
-      protocol: h2mux
-      max-connections: 8
-      min-streams: 16
-      padding: true
 
   - name: "${nodeName}-Trojan-TLS"
     type: trojan
@@ -236,12 +230,6 @@ proxies:
         Host: ${host}
       max-early-data: 2560
       early-data-header-name: Sec-WebSocket-Protocol
-    smux:
-      enabled: true
-      protocol: h2mux
-      max-connections: 8
-      min-streams: 16
-      padding: true
 
   - name: "${nodeName}-NoTLS"
     type: vless
@@ -257,12 +245,6 @@ proxies:
         Host: ${host}
       max-early-data: 2560
       early-data-header-name: Sec-WebSocket-Protocol
-    smux:
-      enabled: true
-      protocol: h2mux
-      max-connections: 8
-      min-streams: 16
-      padding: true
 
 proxy-groups:
   - name: 🚀 节点选择
