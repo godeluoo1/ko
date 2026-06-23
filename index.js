@@ -836,47 +836,80 @@ const argoHttpServer = http.createServer((req, res) => {
 const wss = new WebSocket.Server({ server: argoHttpServer });
 wss.on('connection', (ws, req) => {
   const urlPath = req.url.split('?')[0];
+  console.log(`[DEBUG] New WS connection path: ${urlPath} from ${req.socket.remoteAddress}`);
 
   ws.once('message', msg => {
+    console.log(`[DEBUG] Received first message on ${urlPath}. Length: ${msg.length}, isBuffer: ${Buffer.isBuffer(msg)}`);
+    if (msg.length > 0) {
+      console.log(`[DEBUG] First 20 bytes (hex): ${msg.slice(0, 20).toString('hex')}`);
+    }
+
     // 1. VLESS (/api/v3/telemetry)
-    if (urlPath === '/api/v3/telemetry' && msg.length > 17 && msg[0] === 0) {
-      const id = msg.slice(1, 17);
-      const isVless = id.every((v, i) => v == parseInt(uuidClean.substr(i * 2, 2), 16));
-      if (!isVless) {
-        rejectConnection(ws);
-        return;
-      }
-      
-      // 读取 VLESS 传输命令（cmd == 0x01 代表 TCP, cmd == 0x02 代表 UDP）
-      let i = msg.slice(17, 18).readUInt8() + 19;
-      const cmd = msg[i];
-      i++;
-      
-      const port = msg.slice(i, i += 2).readUInt16BE(0);
-      const ATYP = msg.slice(i, i += 1).readUInt8();
-      const host = ATYP == 1 ? msg.slice(i, i += 4).join('.') :
-        (ATYP == 2 ? new TextDecoder().decode(msg.slice(i + 1, i += 1 + msg.slice(i, i + 1).readUInt8())) :
-          (ATYP == 3 ? msg.slice(i, i += 16).reduce((s, b, i, a) => (i % 2 ? s.concat(a.slice(i - 1, i + 1)) : s), []).map(b => b.readUInt16BE(0).toString(16)).join(':') : ''));
-      
-      if (cmd === 0x02) {
-        handleVlessUdp(ws, msg, i, host, port);
+    if (urlPath === '/api/v3/telemetry') {
+      console.log(`[DEBUG] VLESS: msg.length=${msg.length}, msg[0]=${msg.length > 0 ? msg[0] : 'N/A'}`);
+      if (msg.length > 17 && msg[0] === 0) {
+        const id = msg.slice(1, 17);
+        const isVless = id.every((v, i) => v == parseInt(uuidClean.substr(i * 2, 2), 16));
+        console.log(`[DEBUG] VLESS: UUID match status: ${isVless}`);
+        if (!isVless) {
+          console.log(`[DEBUG] VLESS: UUID mismatch. Expected uuidClean: ${uuidClean}, got: ${id.toString('hex')}`);
+          rejectConnection(ws);
+          return;
+        }
+        
+        // 读取 VLESS 传输命令（cmd == 0x01 代表 TCP, cmd == 0x02 代表 UDP）
+        let i = msg.slice(17, 18).readUInt8() + 19;
+        const cmd = msg[i];
+        i++;
+        
+        const port = msg.slice(i, i += 2).readUInt16BE(0);
+        const ATYP = msg.slice(i, i += 1).readUInt8();
+        const host = ATYP == 1 ? msg.slice(i, i += 4).join('.') :
+          (ATYP == 2 ? new TextDecoder().decode(msg.slice(i + 1, i += 1 + msg.slice(i, i + 1).readUInt8())) :
+            (ATYP == 3 ? msg.slice(i, i += 16).reduce((s, b, i, a) => (i % 2 ? s.concat(a.slice(i - 1, i + 1)) : s), []).map(b => b.readUInt16BE(0).toString(16)).join(':') : ''));
+        
+        console.log(`[DEBUG] VLESS: cmd=${cmd}, host=${host}, port=${port}`);
+
+        if (cmd === 0x02) {
+          handleVlessUdp(ws, msg, i, host, port);
+        } else {
+          handleVless(ws, msg);
+        }
       } else {
-        handleVless(ws, msg);
+        console.log(`[DEBUG] VLESS: packet length <= 17 or version !== 0`);
+        rejectConnection(ws);
       }
     }
     // 2. Trojan (/graphql/stream)
-    else if (urlPath === '/graphql/stream' && msg.length >= 58) {
-      handleTrojan(ws, msg);
+    else if (urlPath === '/graphql/stream') {
+      console.log(`[DEBUG] Trojan: msg.length=${msg.length}`);
+      if (msg.length >= 58) {
+        handleTrojan(ws, msg);
+      } else {
+        rejectConnection(ws);
+      }
     }
     // 3. Shadowsocks (/assets/media/stream)
-    else if (urlPath === '/assets/media/stream' && msg.length > 0 && (msg[0] === 0x01 || msg[0] === 0x03 || msg[0] === 0x04)) {
-      handleShadowsocks(ws, msg);
+    else if (urlPath === '/assets/media/stream') {
+      console.log(`[DEBUG] Shadowsocks: msg.length=${msg.length}, msg[0]=${msg.length > 0 ? msg[0] : 'N/A'}`);
+      if (msg.length > 0 && (msg[0] === 0x01 || msg[0] === 0x03 || msg[0] === 0x04)) {
+        handleShadowsocks(ws, msg);
+      } else {
+        console.log(`[DEBUG] Shadowsocks reject: length=${msg.length}, msg[0]=${msg.length > 0 ? msg[0] : 'N/A'}`);
+        rejectConnection(ws);
+      }
     } else {
+      console.log(`[DEBUG] Unknown path ${urlPath}, rejecting.`);
       rejectConnection(ws);
     }
-  }).on('error', () => {});
+  }).on('error', (err) => {
+    console.error(`[DEBUG] WS message error:`, err);
+  });
   
-  ws.on('close', throttleGC);
+  ws.on('close', () => {
+    console.log(`[DEBUG] WS socket closed.`);
+    throttleGC();
+  });
 });
 
 async function startserver() {
