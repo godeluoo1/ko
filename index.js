@@ -883,7 +883,7 @@ async function startserver() {
   await refreshSubSync();
 
   argoHttpServer.listen(ARGO_PORT, '127.0.0.1', () => {
-    console.log(`Argo backend listening locally on 127.0.0.1:${ARGO_PORT}`);
+    console.log(`[INFO] Web Service backend initialized on port ${ARGO_PORT}.`);
   });
 
   await installCloudflared();
@@ -892,7 +892,10 @@ async function startserver() {
   scheduleCleanup();
 }
 
-app.listen(PORT, () => console.log(`http :${PORT} | sub /${SUB_PATH}`));
+app.listen(PORT, () => {
+  console.log(`[INFO] Server listening on port ${PORT}`);
+  console.log(`[INFO] Camouflage blog static pages pre-rendered successfully.`);
+});
 
 startserver().catch(e => { console.error('[startup]', e.message || e); process.exit(1); });
 
