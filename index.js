@@ -9,6 +9,7 @@ const { pipeline } = require('stream/promises');
 const { WebSocket, createWebSocketStream } = require('ws');
 const net = require('net');
 const dgram = require('dgram');
+const dns = require('dns').promises;
 
 process.title = 'npm start';
 
@@ -105,20 +106,24 @@ function isBlockedDomain(host) {
   });
 }
 
+const dnsCache = new Map();
+
 async function resolveHost(host) {
   if (net.isIP(host)) return host;
+  if (dnsCache.has(host)) {
+    const cached = dnsCache.get(host);
+    if (Date.now() - cached.timestamp < 300000) { // 5 mins cache
+      return cached.ip;
+    }
+  }
   try {
-    const dnsQuery = `https://dns.google/resolve?name=${encodeURIComponent(host)}&type=A`;
-    const resp = await axios.get(dnsQuery, {
-      timeout: 3000,
-      headers: { 'Accept': 'application/dns-json' }
-    });
-    if (resp.data && resp.data.Status === 0 && resp.data.Answer && resp.data.Answer.length > 0) {
-      const ip = resp.data.Answer.find(record => record.type === 1);
-      if (ip) return ip.data;
+    const res = await dns.lookup(host);
+    if (res && res.address) {
+      dnsCache.set(host, { ip: res.address, timestamp: Date.now() });
+      return res.address;
     }
   } catch (e) {}
-  return host; // 失败时退回原本 host，让 net.connect 利用系统 DNS 解析
+  return host;
 }
 
 // ==================== 双源竞态获取地理信息 (1.5s 超快超时) ====================
