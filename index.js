@@ -159,12 +159,13 @@ function buildSub(nodeName) {
 
   const n = encodeURIComponent(nodeName);
 
-  const vlessLine = `vless://${UUID}@${CFIP}:${CFPORT}?encryption=none&security=tls&sni=${host}&fp=${FP}&type=ws&host=${host}&path=%2Fapi%2Fv3%2Ftelemetry%3Fed%3D2560#${n}`;
+  const vlessLine = `vless://${UUID}@${CFIP}:${CFPORT}?encryption=none&security=tls&sni=${host}&fp=${FP}&type=ws&host=${host}&path=%2Fapi%2Fv3%2Ftelemetry#${n}`;
 
-  const trojanLine = `trojan://${UUID}@${CFIP}:${CFPORT}?encryption=none&security=tls&sni=${host}&fp=${FP}&type=ws&host=${host}&path=%2Fgraphql%2Fstream%3Fed%3D2560#${n}`;
+  const trojanLine = `trojan://${UUID}@${CFIP}:${CFPORT}?encryption=none&security=tls&sni=${host}&fp=${FP}&type=ws&host=${host}&path=%2Fgraphql%2Fstream#${n}`;
 
   const ssMethodPassword = Buffer.from(`none:${UUID}`).toString('base64');
-  const ssLine = `ss://${ssMethodPassword}@${CFIP}:${CFPORT}?plugin=v2ray-plugin;mode=websocket;host=${host};path=%2Fassets%2Fmedia%2Fstream;tls;sni=${host}#${n}`;
+  const pluginOpts = encodeURIComponent(`v2ray-plugin;mode=websocket;host=${host};path=/assets/media/stream;tls;sni=${host}`);
+  const ssLine = `ss://${ssMethodPassword}@${CFIP}:${CFPORT}?plugin=${pluginOpts}#${n}`;
 
   return [vlessLine, trojanLine, ssLine].join('\n');
 }
@@ -858,9 +859,9 @@ wss.on('connection', (ws, req) => {
         }
         
         // 读取 VLESS 传输命令（cmd == 0x01 代表 TCP, cmd == 0x02 代表 UDP）
-        let i = msg.slice(17, 18).readUInt8() + 19;
-        const cmd = msg[i];
-        i++;
+        const addonsLen = msg.slice(17, 18).readUInt8();
+        const cmd = msg[18 + addonsLen];
+        let i = addonsLen + 19;
         
         const port = msg.slice(i, i += 2).readUInt16BE(0);
         const ATYP = msg.slice(i, i += 1).readUInt8();
