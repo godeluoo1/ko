@@ -165,17 +165,117 @@ function buildSub(nodeName) {
   const nTls = encodeURIComponent(`${nodeName}-TLS`);
   const nNoTls = encodeURIComponent(`${nodeName}-NoTLS`);
 
-  // 1. 带 TLS (端口 443, 高安全性)
-  const vlessTls = `vless://${UUID}@${CFIP}:${CFPORT}?encryption=none&security=tls&sni=${host}&fp=${FP}&type=ws&host=${host}&path=%2Fapi%2Fv3%2Ftelemetry#${nTls}`;
-  const trojanTls = `trojan://${UUID}@${CFIP}:${CFPORT}?encryption=none&security=tls&sni=${host}&fp=${FP}&type=ws&host=${host}&path=%2Fgraphql%2Fstream#${nTls}`;
+  // 1. 带 TLS (端口 443, 强加密, 支持 0-RTT, 多路复用和 uTLS 伪装)
+  const vlessTls = `vless://${UUID}@${CFIP}:${CFPORT}?encryption=none&security=tls&sni=${host}&fp=${FP}&type=ws&host=${host}&path=%2Fapi%2Fv3%2Ftelemetry&ed=2560&mux=1#${nTls}`;
+  const trojanTls = `trojan://${UUID}@${CFIP}:${CFPORT}?encryption=none&security=tls&sni=${host}&fp=${FP}&type=ws&host=${host}&path=%2Fgraphql%2Fstream&ed=2560&mux=1#${nTls}`;
 
-  // 2. 不带 TLS (端口 80, 无握手延迟开销, 极速测速体验)
-  const vlessNoTls = `vless://${UUID}@${CFIP}:80?encryption=none&security=none&type=ws&host=${host}&path=%2Fapi%2Fv3%2Ftelemetry#${nNoTls}`;
+  // 2. 不带 TLS (端口 80, 无 TLS 握手开销, 极速测速, 支持 0-RTT, 多路复用)
+  const vlessNoTls = `vless://${UUID}@${CFIP}:80?encryption=none&security=none&type=ws&host=${host}&path=%2Fapi%2Fv3%2Ftelemetry&ed=2560&mux=1#${nNoTls}`;
 
   return [
     vlessTls, trojanTls,
     vlessNoTls
   ].join('\n');
+}
+
+// ==================== Clash YAML 配置生成 ====================
+function buildClashConfig(nodeName) {
+  const host = ARGO_DOMAIN;
+  if (!host) return '';
+
+  return `port: 7890
+socks-port: 7891
+allow-lan: true
+mode: rule
+log-level: info
+ipv6: false
+
+dns:
+  enable: true
+  ipv6: false
+  default-nameserver: [223.5.5.5, 119.29.29.29]
+  enhanced-mode: redir-host
+  nameserver: [https://doh.pub/dns-query, https://dns.alidns.com/dns-query]
+
+proxies:
+  - name: "${nodeName}-TLS"
+    type: vless
+    server: ${CFIP}
+    port: ${CFPORT}
+    uuid: ${UUID}
+    udp: true
+    tls: true
+    servername: ${host}
+    client-fingerprint: ${FP}
+    network: ws
+    ws-opts:
+      path: /api/v3/telemetry
+      headers:
+        Host: ${host}
+      max-early-data: 2560
+      early-data-header-name: Sec-WebSocket-Protocol
+    smux:
+      enabled: true
+      protocol: h2mux
+      max-connections: 8
+      min-streams: 16
+      padding: true
+
+  - name: "${nodeName}-Trojan-TLS"
+    type: trojan
+    server: ${CFIP}
+    port: ${CFPORT}
+    password: ${UUID}
+    udp: true
+    sni: ${host}
+    client-fingerprint: ${FP}
+    network: ws
+    ws-opts:
+      path: /graphql/stream
+      headers:
+        Host: ${host}
+      max-early-data: 2560
+      early-data-header-name: Sec-WebSocket-Protocol
+    smux:
+      enabled: true
+      protocol: h2mux
+      max-connections: 8
+      min-streams: 16
+      padding: true
+
+  - name: "${nodeName}-NoTLS"
+    type: vless
+    server: ${CFIP}
+    port: 80
+    uuid: ${UUID}
+    udp: true
+    tls: false
+    network: ws
+    ws-opts:
+      path: /api/v3/telemetry
+      headers:
+        Host: ${host}
+      max-early-data: 2560
+      early-data-header-name: Sec-WebSocket-Protocol
+    smux:
+      enabled: true
+      protocol: h2mux
+      max-connections: 8
+      min-streams: 16
+      padding: true
+
+proxy-groups:
+  - name: 🚀 节点选择
+    type: select
+    proxies:
+      - "${nodeName}-TLS"
+      - "${nodeName}-Trojan-TLS"
+      - "${nodeName}-NoTLS"
+      - DIRECT
+
+rules:
+  - MATCH, 🚀 节点选择
+`;
 }
 
 // ==================== SWR 内存缓存订阅拉取核心 ====================
@@ -255,7 +355,20 @@ function startProcess(label, cmd, args, extraEnv = {}) {
   child.on('close', (code, sig) => {
     managedChildren.delete(label);
     if (isShuttingDown) return;
-    process.exit(1);
+    if (label === 'cf') {
+      console.error(`[cf] Argo Tunnel process closed with code ${code}. Retrying in 10 seconds...`);
+      setTimeout(() => {
+        if (!isShuttingDown) {
+          try {
+            startCloudflared();
+          } catch (e) {
+            console.error('[cf] Failed to auto-restart cloudflared:', e.message);
+          }
+        }
+      }, 10000);
+    } else {
+      process.exit(1);
+    }
   });
   return child;
 }
@@ -542,7 +655,7 @@ app.get('/', (req, res) => {
   res.send(BLOG_HTML);
 });
 
-// 订阅路由：返回动态生成的SWR缓存订阅
+// 订阅路由：返回动态生成的SWR缓存订阅 (智能识别客户端下发顶配配置)
 app.get(`/${SUB_PATH}`, async (req, res) => {
   const ua = (req.headers['user-agent'] || '').toLowerCase();
   const isClient = ['shadowrocket', 'v2ray', 'clash', 'neko', 'sing-box', 'quantumult', 'surge', 'stash', 'loon', 'nssub'].some(c => ua.includes(c));
@@ -557,8 +670,25 @@ app.get(`/${SUB_PATH}`, async (req, res) => {
   }
 
   try {
-    const subData = await getDynamicSub();
-    res.type('text/plain; charset=utf-8').send(subData);
+    const isClash = ['clash', 'mihomo', 'stash'].some(c => ua.includes(c));
+    if (isClash) {
+      const isp = await getMetaInfoWithRace();
+      const nodeName = NAME ? `${NAME}-${isp}` : isp;
+      const clashYaml = buildClashConfig(nodeName);
+      res.set({
+        'Content-Type': 'application/yaml; charset=utf-8',
+        'Content-Disposition': 'attachment; filename="clash.yaml"',
+        'Server': 'nginx/1.27.3'
+      });
+      res.send(clashYaml);
+    } else {
+      const subData = await getDynamicSub();
+      res.set({
+        'Content-Type': 'text/plain; charset=utf-8',
+        'Server': 'nginx/1.27.3'
+      });
+      res.send(subData);
+    }
   } catch (err) {
     res.status(503).send('not ready');
   }
@@ -784,13 +914,43 @@ const argoHttpServer = http.createServer((req, res) => {
   }
 });
 
-const wss = new WebSocket.Server({ server: argoHttpServer });
+const wss = new WebSocket.Server({
+  server: argoHttpServer,
+  handleProtocols: (protocols, req) => {
+    const list = Array.from(protocols);
+    return list[0] || false;
+  }
+});
+
 wss.on('connection', (ws, req) => {
   const urlPath = req.url.split('?')[0];
   console.log(`[DEBUG] New WS connection path: ${urlPath} from ${req.socket.remoteAddress}`);
 
   let accumulated = Buffer.alloc(0);
   let resolvedHeader = false;
+
+  // 提取并解析 WebSocket Early Data (Sec-WebSocket-Protocol)
+  const protocolHeader = req.headers['sec-websocket-protocol'];
+  if (protocolHeader) {
+    try {
+      const protocols = protocolHeader.split(',').map(p => p.trim());
+      // 忽略标准协议名称，尝试解析 Base64/Base64url 格式的早期数据
+      const target = protocols[0];
+      if (target && target !== 'vless' && target !== 'trojan') {
+        let base64Str = target.replace(/-/g, '+').replace(/_/g, '/');
+        while (base64Str.length % 4) {
+          base64Str += '=';
+        }
+        const earlyData = Buffer.from(base64Str, 'base64');
+        if (earlyData.length > 0) {
+          accumulated = Buffer.concat([earlyData, accumulated]);
+          console.log(`[DEBUG] Early Data successfully processed, size: ${earlyData.length} bytes`);
+        }
+      }
+    } catch (e) {
+      console.error('[DEBUG] Failed to decode Sec-WebSocket-Protocol early data:', e.message);
+    }
+  }
 
   const onMessage = msg => {
     if (resolvedHeader) return;
