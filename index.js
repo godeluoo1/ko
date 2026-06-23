@@ -168,16 +168,13 @@ function buildSub(nodeName) {
   // 1. 带 TLS (端口 443, 高安全性)
   const vlessTls = `vless://${UUID}@${CFIP}:${CFPORT}?encryption=none&security=tls&sni=${host}&fp=${FP}&type=ws&host=${host}&path=%2Fapi%2Fv3%2Ftelemetry#${nTls}`;
   const trojanTls = `trojan://${UUID}@${CFIP}:${CFPORT}?encryption=none&security=tls&sni=${host}&fp=${FP}&type=ws&host=${host}&path=%2Fgraphql%2Fstream#${nTls}`;
-  const ssMethodPassword = Buffer.from(`none:${UUID}`).toString('base64');
-  const ssTls = `ss://${ssMethodPassword}@${CFIP}:${CFPORT}?plugin=v2ray-plugin;mode=websocket;host=${host};path=/assets/media/stream;tls;sni=${host}#${nTls}`;
 
   // 2. 不带 TLS (端口 80, 无握手延迟开销, 极速测速体验)
   const vlessNoTls = `vless://${UUID}@${CFIP}:80?encryption=none&security=none&type=ws&host=${host}&path=%2Fapi%2Fv3%2Ftelemetry#${nNoTls}`;
-  const ssNoTls = `ss://${ssMethodPassword}@${CFIP}:80?plugin=v2ray-plugin;mode=websocket;host=${host};path=/assets/media/stream#${nNoTls}`;
 
   return [
-    vlessTls, trojanTls, ssTls,
-    vlessNoTls, ssNoTls
+    vlessTls, trojanTls,
+    vlessNoTls
   ].join('\n');
 }
 
