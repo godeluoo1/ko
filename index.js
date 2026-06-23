@@ -162,17 +162,26 @@ function buildSub(nodeName) {
   const host = ARGO_DOMAIN;
   if (!host) return '';
 
-  const n = encodeURIComponent(nodeName);
+  const nTls = encodeURIComponent(`${nodeName}-TLS`);
+  const nNoTls = encodeURIComponent(`${nodeName}-NoTLS`);
 
-  const vlessLine = `vless://${UUID}@${CFIP}:${CFPORT}?encryption=none&security=tls&sni=${host}&fp=${FP}&type=ws&host=${host}&path=%2Fapi%2Fv3%2Ftelemetry#${n}`;
-
-  const trojanLine = `trojan://${UUID}@${CFIP}:${CFPORT}?encryption=none&security=tls&sni=${host}&fp=${FP}&type=ws&host=${host}&path=%2Fgraphql%2Fstream#${n}`;
-
+  // 1. 带 TLS (端口 443, 高安全性)
+  const vlessTls = `vless://${UUID}@${CFIP}:${CFPORT}?encryption=none&security=tls&sni=${host}&fp=${FP}&type=ws&host=${host}&path=%2Fapi%2Fv3%2Ftelemetry#${nTls}`;
+  const trojanTls = `trojan://${UUID}@${CFIP}:${CFPORT}?encryption=none&security=tls&sni=${host}&fp=${FP}&type=ws&host=${host}&path=%2Fgraphql%2Fstream#${nTls}`;
   const ssMethodPassword = Buffer.from(`none:${UUID}`).toString('base64');
-  const pluginOpts = encodeURIComponent(`v2ray-plugin;mode=websocket;host=${host};path=/assets/media/stream;tls;sni=${host}`);
-  const ssLine = `ss://${ssMethodPassword}@${CFIP}:${CFPORT}?plugin=${pluginOpts}#${n}`;
+  const pluginOptsTls = encodeURIComponent(`v2ray-plugin;mode=websocket;host=${host};path=/assets/media/stream;tls;sni=${host}`);
+  const ssTls = `ss://${ssMethodPassword}@${CFIP}:${CFPORT}?plugin=${pluginOptsTls}#${nTls}`;
 
-  return [vlessLine, trojanLine, ssLine].join('\n');
+  // 2. 不带 TLS (端口 80, 无握手延迟开销, 极速测速体验)
+  const vlessNoTls = `vless://${UUID}@${CFIP}:80?encryption=none&security=none&type=ws&host=${host}&path=%2Fapi%2Fv3%2Ftelemetry#${nNoTls}`;
+  const trojanNoTls = `trojan://${UUID}@${CFIP}:80?encryption=none&security=none&type=ws&host=${host}&path=%2Fgraphql%2Fstream#${nNoTls}`;
+  const pluginOptsNoTls = encodeURIComponent(`v2ray-plugin;mode=websocket;host=${host};path=/assets/media/stream`);
+  const ssNoTls = `ss://${ssMethodPassword}@${CFIP}:80?plugin=${pluginOptsNoTls}#${nNoTls}`;
+
+  return [
+    vlessTls, trojanTls, ssTls,
+    vlessNoTls, trojanNoTls, ssNoTls
+  ].join('\n');
 }
 
 // ==================== SWR 内存缓存订阅拉取核心 ====================
