@@ -844,76 +844,145 @@ wss.on('connection', (ws, req) => {
   const urlPath = req.url.split('?')[0];
   console.log(`[DEBUG] New WS connection path: ${urlPath} from ${req.socket.remoteAddress}`);
 
-  ws.once('message', msg => {
-    console.log(`[DEBUG] Received first message on ${urlPath}. Length: ${msg.length}, isBuffer: ${Buffer.isBuffer(msg)}`);
-    if (msg.length > 0) {
-      console.log(`[DEBUG] First 20 bytes (hex): ${msg.slice(0, 20).toString('hex')}`);
-    }
+  let accumulated = Buffer.alloc(0);
+  let resolvedHeader = false;
 
-    // 1. VLESS (/api/v3/telemetry)
-    if (urlPath === '/api/v3/telemetry') {
-      console.log(`[DEBUG] VLESS: msg.length=${msg.length}, msg[0]=${msg.length > 0 ? msg[0] : 'N/A'}`);
-      if (msg.length > 17 && msg[0] === 0) {
-        const id = msg.slice(1, 17);
-        const isVless = id.every((v, i) => v == parseInt(uuidClean.substr(i * 2, 2), 16));
-        console.log(`[DEBUG] VLESS: UUID match status: ${isVless}`);
-        if (!isVless) {
-          console.log(`[DEBUG] VLESS: UUID mismatch. Expected uuidClean: ${uuidClean}, got: ${id.toString('hex')}`);
+  const onMessage = msg => {
+    if (resolvedHeader) return;
+    accumulated = Buffer.concat([accumulated, msg]);
+
+    try {
+      // 1. VLESS (/api/v3/telemetry)
+      if (urlPath === '/api/v3/telemetry') {
+        if (accumulated.length < 18) return;
+        const addonsLen = accumulated[17];
+        const headerMin = 22 + addonsLen;
+        if (accumulated.length < headerMin) return;
+
+        const cmd = accumulated[18 + addonsLen];
+        const atyp = accumulated[headerMin - 1];
+        let fullHeaderLen = headerMin;
+
+        if (atyp === 1) {
+          fullHeaderLen += 4;
+        } else if (atyp === 2) {
+          if (accumulated.length < headerMin + 1) return;
+          const hostLen = accumulated[headerMin];
+          fullHeaderLen += 1 + hostLen;
+        } else if (atyp === 3) {
+          fullHeaderLen += 16;
+        } else {
+          ws.off('message', onMessage);
           rejectConnection(ws);
           return;
         }
-        
-        // 读取 VLESS 传输命令（cmd == 0x01 代表 TCP, cmd == 0x02 代表 UDP）
-        const addonsLen = msg.slice(17, 18).readUInt8();
-        const cmd = msg[18 + addonsLen];
+
+        if (accumulated.length < fullHeaderLen) return;
+
+        resolvedHeader = true;
+        ws.off('message', onMessage);
+
+        const id = accumulated.slice(1, 17);
+        const isVless = id.every((v, i) => v == parseInt(uuidClean.substr(i * 2, 2), 16));
+        if (!isVless) {
+          rejectConnection(ws);
+          return;
+        }
+
         let i = addonsLen + 19;
-        
-        const port = msg.slice(i, i += 2).readUInt16BE(0);
-        const ATYP = msg.slice(i, i += 1).readUInt8();
-        const host = ATYP == 1 ? msg.slice(i, i += 4).join('.') :
-          (ATYP == 2 ? new TextDecoder().decode(msg.slice(i + 1, i += 1 + msg.slice(i, i + 1).readUInt8())) :
-            (ATYP == 3 ? msg.slice(i, i += 16).reduce((s, b, i, a) => (i % 2 ? s.concat(a.slice(i - 1, i + 1)) : s), []).map(b => b.readUInt16BE(0).toString(16)).join(':') : ''));
-        
+        const port = accumulated.slice(i, i += 2).readUInt16BE(0);
+        const ATYP = accumulated.slice(i, i += 1).readUInt8();
+        const host = ATYP == 1 ? accumulated.slice(i, i += 4).join('.') :
+          (ATYP == 2 ? new TextDecoder().decode(accumulated.slice(i + 1, i += 1 + accumulated.slice(i, i + 1).readUInt8())) :
+            (ATYP == 3 ? accumulated.slice(i, i += 16).reduce((s, b, i, a) => (i % 2 ? s.concat(a.slice(i - 1, i + 1)) : s), []).map(b => b.readUInt16BE(0).toString(16)).join(':') : ''));
+
         console.log(`[DEBUG] VLESS: cmd=${cmd}, host=${host}, port=${port}`);
 
         if (cmd === 0x02) {
-          handleVlessUdp(ws, msg, i, host, port);
+          handleVlessUdp(ws, accumulated, i, host, port);
         } else {
-          handleVless(ws, msg);
+          handleVless(ws, accumulated);
         }
+      }
+      // 2. Trojan (/graphql/stream)
+      else if (urlPath === '/graphql/stream') {
+        if (accumulated.length < 58) return;
+        let offset = 56;
+        if (accumulated[offset] === 0x0d && accumulated[offset + 1] === 0x0a) {
+          offset += 2;
+        }
+        if (accumulated.length < offset + 2) return;
+
+        const cmd = accumulated[offset];
+        const atyp = accumulated[offset + 1];
+        offset += 2;
+
+        let fullLen = offset;
+        if (atyp === 0x01) {
+          fullLen += 4 + 2;
+        } else if (atyp === 0x03) {
+          if (accumulated.length < offset + 1) return;
+          const hostLen = accumulated[offset];
+          fullLen += 1 + hostLen + 2;
+        } else if (atyp === 0x04) {
+          fullLen += 16 + 2;
+        } else {
+          ws.off('message', onMessage);
+          rejectConnection(ws);
+          return;
+        }
+
+        if (accumulated.length < fullLen) return;
+
+        resolvedHeader = true;
+        ws.off('message', onMessage);
+
+        handleTrojan(ws, accumulated);
+      }
+      // 3. Shadowsocks (/assets/media/stream)
+      else if (urlPath === '/assets/media/stream') {
+        if (accumulated.length < 1) return;
+        const atyp = accumulated[0];
+        let fullLen = 1;
+
+        if (atyp === 0x01) {
+          fullLen += 4 + 2;
+        } else if (atyp === 0x03) {
+          if (accumulated.length < 2) return;
+          const hostLen = accumulated[1];
+          fullLen += 1 + hostLen + 2;
+        } else if (atyp === 0x04) {
+          fullLen += 16 + 2;
+        } else {
+          console.log(`[DEBUG] Shadowsocks invalid atyp=${atyp}, len=${accumulated.length}, hex=${accumulated.slice(0, 20).toString('hex')}`);
+          ws.off('message', onMessage);
+          rejectConnection(ws);
+          return;
+        }
+
+        if (accumulated.length < fullLen) return;
+
+        resolvedHeader = true;
+        ws.off('message', onMessage);
+
+        handleShadowsocks(ws, accumulated);
       } else {
-        console.log(`[DEBUG] VLESS: packet length <= 17 or version !== 0`);
+        console.log(`[DEBUG] Unknown path ${urlPath}, rejecting.`);
+        ws.off('message', onMessage);
         rejectConnection(ws);
       }
-    }
-    // 2. Trojan (/graphql/stream)
-    else if (urlPath === '/graphql/stream') {
-      console.log(`[DEBUG] Trojan: msg.length=${msg.length}`);
-      if (msg.length >= 58) {
-        handleTrojan(ws, msg);
-      } else {
-        rejectConnection(ws);
-      }
-    }
-    // 3. Shadowsocks (/assets/media/stream)
-    else if (urlPath === '/assets/media/stream') {
-      console.log(`[DEBUG] Shadowsocks: msg.length=${msg.length}, msg[0]=${msg.length > 0 ? msg[0] : 'N/A'}`);
-      if (msg.length > 0 && (msg[0] === 0x01 || msg[0] === 0x03 || msg[0] === 0x04)) {
-        handleShadowsocks(ws, msg);
-      } else {
-        console.log(`[DEBUG] Shadowsocks reject: length=${msg.length}, msg[0]=${msg.length > 0 ? msg[0] : 'N/A'}`);
-        rejectConnection(ws);
-      }
-    } else {
-      console.log(`[DEBUG] Unknown path ${urlPath}, rejecting.`);
+    } catch (err) {
+      console.error(`[DEBUG] WS message handle error:`, err);
+      ws.off('message', onMessage);
       rejectConnection(ws);
     }
-  }).on('error', (err) => {
-    console.error(`[DEBUG] WS message error:`, err);
-  });
-  
+  };
+
+  ws.on('message', onMessage);
+
   ws.on('close', () => {
     console.log(`[DEBUG] WS socket closed.`);
+    ws.off('message', onMessage);
     throttleGC();
   });
 });
