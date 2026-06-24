@@ -116,13 +116,40 @@ async function resolveHost(host) {
       return cached.ip;
     }
   }
+  
+  // 1. 尝试常规本地 DNS 解析
   try {
     const res = await dns.lookup(host);
     if (res && res.address) {
       dnsCache.set(host, { ip: res.address, timestamp: Date.now() });
       return res.address;
     }
-  } catch (e) {}
+  } catch (e) {
+    // 忽略并进入 DoH 应急回退
+  }
+
+  // 2. 应急 DoH (DNS over HTTPS) 解析
+  try {
+    const dohQueries = [
+      axios.get(`https://dns.google/resolve?name=${encodeURIComponent(host)}&type=A`, { timeout: 3000 }),
+      axios.get(`https://1.1.1.1/dns-query?name=${encodeURIComponent(host)}&type=A`, { headers: { 'Accept': 'application/dns-json' }, timeout: 3000 })
+    ];
+    const response = await Promise.any(dohQueries);
+    const data = response.data;
+    if (data && data.Status === 0 && data.Answer && data.Answer.length > 0) {
+      const aRecord = data.Answer.find(record => record.type === 1);
+      if (aRecord && aRecord.data) {
+        const ip = aRecord.data.trim();
+        if (net.isIP(ip)) {
+          dnsCache.set(host, { ip, timestamp: Date.now() });
+          return ip;
+        }
+      }
+    }
+  } catch (err) {
+    // DoH 解析也失败，保持原样
+  }
+
   return host;
 }
 
@@ -366,7 +393,7 @@ function startCloudflared() {
     fs.writeFileSync(tunnelJsonPath, ARGO_AUTH);
     fs.writeFileSync(tunnelYmlPath, [
       `tunnel: ${tid}`, `credentials-file: ${tunnelJsonPath}`, `protocol: ${ARGO_PROTOCOL}`,
-      'ingress:', `  - hostname: ${ARGO_DOMAIN}`, `    service: http://localhost:${ARGO_PORT}`, '  - service: http_status:404',
+      'ingress:', `  - hostname: ${ARGO_DOMAIN}`, `    service: http://127.0.0.1:${ARGO_PORT}`, '  - service: http_status:404',
     ].join('\n'));
     return startProcess('cf', botPath, [...base, '--config', tunnelYmlPath, 'run']);
   }
@@ -447,10 +474,10 @@ async function autoConfigureArgoTunnel() {
       const ingressRes = await cfAxios.put(`/accounts/${accountId}/cfd_tunnel/${tunnelId}/configurations`, {
         config: {
           ingress: [
-            { hostname: ARGO_DOMAIN, path: '/api/v3/telemetry', service: `http://localhost:${ARGO_PORT}` },
-            { hostname: ARGO_DOMAIN, path: '/graphql/stream', service: `http://localhost:${ARGO_PORT}` },
-            { hostname: ARGO_DOMAIN, path: `/${SUB_PATH}`, service: `http://localhost:${PORT}` },
-            { hostname: ARGO_DOMAIN, service: `http://localhost:${PORT}` },
+            { hostname: ARGO_DOMAIN, path: '/api/v3/telemetry', service: `http://127.0.0.1:${ARGO_PORT}` },
+            { hostname: ARGO_DOMAIN, path: '/graphql/stream', service: `http://127.0.0.1:${ARGO_PORT}` },
+            { hostname: ARGO_DOMAIN, path: `/${SUB_PATH}`, service: `http://127.0.0.1:${PORT}` },
+            { hostname: ARGO_DOMAIN, service: `http://127.0.0.1:${PORT}` },
             { service: 'http_status:404' }
           ],
           'warp-routing': { enabled: false }
@@ -1108,6 +1135,12 @@ wss.on('connection', (ws, req) => {
             (ATYP == 3 ? accumulated.slice(i, i += 16).reduce((s, b, i, a) => (i % 2 ? s.concat(a.slice(i - 1, i + 1)) : s), []).map(b => b.readUInt16BE(0).toString(16)).join(':') : ''));
 
         console.log(`[DEBUG] VLESS: cmd=${cmd}, host=${host}, port=${port}`);
+
+        if (cmd !== 0x01 && cmd !== 0x02) {
+          console.error(`[DEBUG] Unsupported VLESS cmd: ${cmd}, closing connection.`);
+          ws.close();
+          return;
+        }
 
         if (cmd === 0x02) {
           handleVlessUdp(ws, accumulated, i, host, port);
