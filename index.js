@@ -1202,7 +1202,6 @@ const wss = new WebSocket.Server({
 
 wss.on('connection', (ws, req) => {
   const urlPath = req.url.split('?')[0];
-  console.log(`[DEBUG] New WS connection path: ${urlPath} from ${req.socket.remoteAddress}`);
 
   let accumulated = Buffer.alloc(0);
   let resolvedHeader = false;
@@ -1230,11 +1229,9 @@ wss.on('connection', (ws, req) => {
         const earlyData = Buffer.from(base64Str, 'base64');
         if (earlyData.length > 0) {
           accumulated = Buffer.concat([earlyData, accumulated]);
-          console.log(`[DEBUG] Early Data successfully processed, size: ${earlyData.length} bytes`);
         }
       }
     } catch (e) {
-      console.error('[DEBUG] Failed to decode Sec-WebSocket-Protocol early data:', e.message);
     }
   }
 
@@ -1286,10 +1283,7 @@ wss.on('connection', (ws, req) => {
           (ATYP == 2 ? new TextDecoder().decode(accumulated.slice(i + 1, i += 1 + accumulated.slice(i, i + 1).readUInt8())) :
             (ATYP == 3 ? accumulated.slice(i, i += 16).reduce((s, b, i, a) => (i % 2 ? s.concat(a.slice(i - 1, i + 1)) : s), []).map(b => b.readUInt16BE(0).toString(16)).join(':') : ''));
 
-        console.log(`[DEBUG] VL: cmd=${cmd}, host=${host}, port=${port}`);
-
         if (cmd !== 0x01 && cmd !== 0x02) {
-          console.error(`[DEBUG] Unsupported VL cmd: ${cmd}, closing connection.`);
           ws.close();
           return;
         }
@@ -1336,12 +1330,10 @@ wss.on('connection', (ws, req) => {
 
         hTr(ws, accumulated);
       } else {
-        console.log(`[DEBUG] Unknown path ${urlPath}, rejecting.`);
         ws.off('message', onMessage);
         rejectConnection(ws);
       }
     } catch (err) {
-      console.error(`[DEBUG] WS message handle error:`, err);
       ws.off('message', onMessage);
       rejectConnection(ws);
     }
@@ -1360,7 +1352,6 @@ wss.on('connection', (ws, req) => {
   }
 
   ws.on('close', () => {
-    console.log(`[DEBUG] WS socket closed.`);
     ws.off('message', onMessage);
     throttleGC();
   });
