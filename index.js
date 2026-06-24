@@ -1180,12 +1180,11 @@ function handleTrojan(ws, msg) {
 const argoHttpServer = http.createServer((req, res) => {
   const urlPath = req.url.split('?')[0];
   if (['/api/v3/telemetry', '/graphql/stream'].includes(urlPath)) {
-    // 302重定向至PORT
     res.writeHead(302, { 'Location': '/' });
     res.end();
   } else {
-    res.writeHead(404, { 'Server': 'nginx/1.27.3', 'Content-Type': 'text/html; charset=utf-8' });
-    res.end(NGINX_404);
+    // 核心安全升级：将普通 HTTP 请求直接流转给内部的 Express 处理，实现单隧道单端口承载全套服务，完全不需要在公网暴露任何容器端口！
+    app(req, res);
   }
 });
 
