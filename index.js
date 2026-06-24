@@ -1235,10 +1235,8 @@ wss.on('connection', (ws, req) => {
     }
   }
 
-  const onMessage = msg => {
+  const parseHeader = () => {
     if (resolvedHeader) return;
-    accumulated = Buffer.concat([accumulated, msg]);
-
     try {
       // 1. VLESS (/api/v3/telemetry)
       if (urlPath === '/api/v3/telemetry') {
@@ -1346,7 +1344,17 @@ wss.on('connection', (ws, req) => {
     }
   };
 
+  const onMessage = msg => {
+    if (resolvedHeader) return;
+    accumulated = Buffer.concat([accumulated, msg]);
+    parseHeader();
+  };
+
   ws.on('message', onMessage);
+
+  if (accumulated.length > 0) {
+    parseHeader();
+  }
 
   ws.on('close', () => {
     console.log(`[DEBUG] WS socket closed.`);
