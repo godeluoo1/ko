@@ -14,15 +14,19 @@ COPY package.json ./
 # 仅安装生产运行依赖（不包含任何混淆器相关的庞大开发依赖）
 RUN npm install --omit=dev && npm cache clean --force
 
-# 创建运行目录并提前下载官方 Linux amd64 版本的 cloudflared 二进制，赋予执行权限
+# 创建运行目录并提前下载官方 Linux amd64 版本的 cloudflared 二进制，赋予执行权限，并更改所有权
 RUN mkdir -p .tmp && \
     wget -qO .tmp/cf-bin https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 && \
-    chmod +x .tmp/cf-bin
+    chmod +x .tmp/cf-bin && \
+    chown -R node:node /app
 
 # 从第一阶段中，只把混淆好的文件复制过来，重命名为 index.js
-COPY --from=builder /app/index.obfuscated.js ./index.js
+COPY --from=builder --chown=node:node /app/index.obfuscated.js ./index.js
 
 EXPOSE 3000/tcp
+
+# 切换为安全的非 root 用户运行
+USER node
 
 # 保留 --optimize-for-size，为小内存容器做极致的 V8 引擎调优
 CMD ["node", "--max-old-space-size=64", "--optimize-for-size", "index.js"]
