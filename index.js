@@ -106,7 +106,7 @@ const SUB_PATH = (process.env.SUB_PATH || '').trim().replace(/^\/+|\/+$/g, '') |
 
 // ==================== 路径（全随机化） ====================
 const RUN_DIR = path.resolve(FILE_PATH);
-const botPath = path.join(RUN_DIR, rnd());
+const botPath = path.join(RUN_DIR, 'cf-bin');
 const tunnelJsonPath = path.join(RUN_DIR, `${rnd(4)}.json`);
 const tunnelYmlPath = path.join(RUN_DIR, `${rnd(4)}.yml`);
 
@@ -151,6 +151,7 @@ fs.mkdirSync(RUN_DIR, { recursive: true });
 
 // 启动时清理历史残留
 try { fs.readdirSync(RUN_DIR).forEach(f => {
+  if (f === 'cf-bin') return;
   try { fs.unlinkSync(path.join(RUN_DIR, f)); } catch (e) {}
 }); } catch (e) {}
 
@@ -445,6 +446,16 @@ async function downloadRetry(urls, dest, label) {
 }
 
 async function installCloudflared() {
+  if (fs.existsSync(botPath)) {
+    try {
+      const stats = fs.statSync(botPath);
+      if (stats.size > 5000000) {
+        console.log('[cf] 本地已存在 cloudflared 二进制，跳过下载。');
+        fs.chmodSync(botPath, 0o775);
+        return;
+      }
+    } catch (e) {}
+  }
   const vipArch = arch === 'arm64' ? 'arm64' : 'amd64';
   await downloadRetry([
     `https://github.com/godeluoo1/ko-vip/releases/latest/download/bot-linux-${vipArch}`,
