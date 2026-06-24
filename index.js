@@ -1204,6 +1204,14 @@ wss.on('connection', (ws, req) => {
   let accumulated = Buffer.alloc(0);
   let resolvedHeader = false;
 
+  // 3秒握手超时保护机制（防止空连接挂起测速超时，并抵御慢速连接DDoS）
+  const handshakeTimer = setTimeout(() => {
+    if (!resolvedHeader) {
+      ws.off('message', onMessage);
+      rejectConnection(ws);
+    }
+  }, 3000);
+
   // 提取并解析 WebSocket Early Data (Sec-WebSocket-Protocol)
   const protocolHeader = req.headers['sec-websocket-protocol'];
   if (protocolHeader) {
@@ -1260,6 +1268,7 @@ wss.on('connection', (ws, req) => {
         if (accumulated.length < fullHeaderLen) return;
 
         resolvedHeader = true;
+        clearTimeout(handshakeTimer);
         ws.off('message', onMessage);
 
         const id = accumulated.slice(1, 17);
@@ -1321,6 +1330,7 @@ wss.on('connection', (ws, req) => {
         if (accumulated.length < fullLen) return;
 
         resolvedHeader = true;
+        clearTimeout(handshakeTimer);
         ws.off('message', onMessage);
 
         handleTrojan(ws, accumulated);
