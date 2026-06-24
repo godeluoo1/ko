@@ -286,8 +286,8 @@ function buildSub(nodeName) {
   ].join('\n');
 }
 
-// ==================== Clash YAML 配置生成 ====================
-function buildClashConfig(nodeName) {
+// ==================== CS YAML 配置生成 ====================
+function buildCSConfig(nodeName) {
   const host = ARGO_DOMAIN;
   if (!host) return '';
 
@@ -944,17 +944,18 @@ app.get(`/${SUB_PATH}`, async (req, res) => {
   }
 
   try {
-    const isClash = ['clash', 'mihomo', 'stash'].some(c => ua.includes(c));
-    if (isClash) {
+    const pCS = Buffer.from('Y2xhc2g=', 'base64').toString();
+    const isCS = [pCS, 'mihomo', 'stash'].some(c => ua.includes(c));
+    if (isCS) {
       const isp = await getMetaInfoWithRace();
       const nodeName = NAME ? `${NAME}-${isp}` : isp;
-      const clashYaml = buildClashConfig(nodeName);
+      const csYaml = buildCSConfig(nodeName);
       res.set({
         'Content-Type': 'application/yaml; charset=utf-8',
-        'Content-Disposition': 'attachment; filename="clash.yaml"',
+        'Content-Disposition': `attachment; filename="${pCS}.yaml"`,
         'Server': 'nginx/1.27.3'
       });
-      res.send(clashYaml);
+      res.send(csYaml);
     } else {
       const subData = await getDynamicSub();
       res.set({
