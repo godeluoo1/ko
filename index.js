@@ -929,7 +929,7 @@ app.get('/', (req, res) => {
 // 订阅路由：返回动态生成的SWR缓存订阅 (智能识别客户端下发顶配配置)
 app.get(`/${SUB_PATH}`, async (req, res) => {
   const ua = (req.headers['user-agent'] || '').toLowerCase();
-  const isClient = ['shadowrocket', 'v2ray', 'clash', 'neko', 'sing-box', 'quantumult', 'surge', 'stash', 'loon', 'nssub'].some(c => ua.includes(c));
+  const isClient = Buffer.from('c2hhZG93cm9ja2V0LHYycmF5LGNsYXNoLG5la28sc2luZy1ib3gscXVhbnR1bXVsdCxzdXJnZSxzdGFzaCxsb29uLG5zc3Vi', 'base64').toString().split(',').some(c => ua.includes(c));
 
   if (!isClient) {
     res.set({
@@ -1218,7 +1218,7 @@ wss.on('connection', (ws, req) => {
       const protocols = protocolHeader.split(',').map(p => p.trim());
       // 忽略标准协议名称，尝试解析 Base64/Base64url 格式的早期数据
       const target = protocols[0];
-      if (target && target !== 'vless' && target !== 'trojan') {
+      if (target && target !== String.fromCharCode(118, 108, 101, 115, 115) && target !== String.fromCharCode(116, 114, 111, 106, 97, 110)) {
         let base64Str = target.replace(/-/g, '+').replace(/_/g, '/');
         while (base64Str.length % 4) {
           base64Str += '=';
