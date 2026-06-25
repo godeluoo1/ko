@@ -849,65 +849,14 @@ function scheduleCleanup() {
 // ==================== 路由（Nginx 404 伪装与 静态博客页） ====================
 const NGINX_404 = '<html>\n<head><title>404 Not Found</title></head>\n<body>\n<center><h1>404 Not Found</h1></center>\n<hr><center>nginx/1.27.3</center>\n</body>\n</html>\n';
 
-    }
-    @media (max-width: 768px) {
-      header, footer {
-        flex-direction: column;
-        gap: 1.5rem;
-        text-align: center;
-      }
-      nav a {
-        margin: 0 1rem;
-      }
-      .socials a {
-        margin: 0 0.75rem;
-      }
-    }
-  </style>
-</head>
-<body>
-  <div class="bg-glow"></div>
-  <header>
-    <div class="logo">Aiden.L</div>
-    <nav>
-      <a href="#projects">项目</a>
-      <a href="#blog">博客</a>
-      <a href="#about">关于</a>
-    </nav>
-  </header>
-  <main>
-    <div class="hero">
-      <h1>Sleek Designs, <br><span>Scalable Systems.</span></h1>
-      <p>林艾登是一名全栈工程师和系统架构师。致力于开发极佳体验 of Web 应用与高性能后端微服务系统，用工程美学编织数字化世界。</p>
-    </div>
-    <div class="cards-grid" id="projects">
-      <div class="card">
-        <div class="card-tag">Golang / Microservice</div>
-        <h3>Lite-RPC</h3>
-        <p>一款基于 HTTP/2 协议开发的轻量级高性能 RPC 框架。支持自适应服务治理、动态负载均衡以及毫秒级心跳保活检测。</p>
-      </div>
-      <div class="card">
-        <div class="card-tag">TypeScript / Network</div>
-        <h3>Fast-Proxy</h3>
-        <p>部署在云原生边界的高性能边缘网关。手写网络协议栈拦截分流，大幅缩短端到端的延迟并内置动态 DoH 缓存机制。</p>
-      </div>
-      <div class="card">
-        <div class="card-tag">Rust / Compiler</div>
-        <h3>WebCompiler</h3>
-        <p>基于 Rust 开发的零配置前端代码构建器。内置极速 CSS/JS 解析器，利用多核多线程实现百兆代码秒级打包输出。</p>
-      </div>
-    </div>
-  </main>
-  <footer>
-    <div>© 2026 Aiden Lin. All rights reserved.</div>
-    <div class="socials">
-      <a href="#">GitHub</a>
-      <a href="#">Twitter</a>
-      <a href="#">Email</a>
-    </div>
-  </footer>
-</body>
-</html>`;
+let BLOG_HTML = '';
+try {
+  BLOG_HTML = fs.readFileSync(path.join(__dirname, 'blog.html'), 'utf8');
+} catch (e) {
+  BLOG_HTML = '<html><head><title>Aiden Lin</title></head><body><h1>Aiden Lin</h1><p>Systems Engineer & Open Source Developer</p></body></html>';
+}
+
+
 
 app.get('/favicon.ico', (req, res) => res.status(204).end());
 
