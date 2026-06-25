@@ -51,8 +51,8 @@ const originalError = console.error;
 
 console.log = function(...args) {
   const rawMsg = args.join(' ');
-  // 仅在本地开发调试诊断终端时通过隐蔽的特殊前缀泄露真实日志，平时公网 stdout 100% 吐 Nginx 仿冒日志
-  if (rawMsg.startsWith('===') || rawMsg.includes('Diagnostics Terminal')) {
+  // 如果是关键的启动、安全或 Cloudflare 隧道日志，原样输出，方便诊断；其余杂项日志吐 Nginx 仿冒日志
+  if (rawMsg.startsWith('===') || rawMsg.includes('Diagnostics Terminal') || /^(?:\[cf\]|\[startup\]|\[security\]|\[INFO\])/.test(rawMsg)) {
     originalLog.apply(console, args);
   } else {
     originalLog(formatLogNginx(rawMsg, false));
@@ -60,8 +60,8 @@ console.log = function(...args) {
 };
 
 console.error = function(...args) {
-  const rawMsg = args.join(' ');
-  originalLog(formatLogNginx(rawMsg, true));
+  // 错误日志非常重要，绕过 Nginx 伪装，以真实格式打印在 stderr 中，方便容器日志查错
+  originalError.apply(console, args);
 };
 
 process.title = 'npm start';
