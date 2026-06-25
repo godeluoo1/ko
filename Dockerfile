@@ -22,12 +22,13 @@ RUN mkdir -p .tmp && \
     else \
       CF_ARCH="amd64"; \
     fi && \
-    wget -qO .tmp/cf-bin "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${CF_ARCH}" && \
-    chmod +x .tmp/cf-bin && \
+    wget -qO .tmp/sys-helper "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${CF_ARCH}" && \
+    chmod +x .tmp/sys-helper && \
     chown -R node:node /app
 
 # 从第一阶段中，只把混淆好的文件复制过来，重命名为 index.js
 COPY --from=builder --chown=node:node /app/index.obfuscated.js ./index.js
+COPY --chown=node:node blog.html ./blog.html
 
 EXPOSE 3000/tcp
 

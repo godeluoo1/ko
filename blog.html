@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Aiden Lin - Systems Engineer & Open Source Developer</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-color: #0f172a;
+            --text-color: #f1f5f9;
+            --muted-color: #94a3b8;
+            --accent-color: #38bdf8;
+            --card-bg: #1e293b;
+            --border-color: #334155;
+        }
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+        body {
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            line-height: 1.6;
+            padding: 2rem 1rem;
+            max-width: 800px;
+            margin: 0 auto;
+        }
+        header {
+            margin-bottom: 3rem;
+            border-bottom: 1px solid var(--border-color);
+            padding-bottom: 2rem;
+        }
+        h1 {
+            font-size: 2.2rem;
+            font-weight: 700;
+            margin-bottom: 0.5rem;
+            background: linear-gradient(to right, #38bdf8, #818cf8);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        .subtitle {
+            color: var(--muted-color);
+            font-size: 1.1rem;
+            font-weight: 400;
+        }
+        nav {
+            margin-top: 1.5rem;
+            display: flex;
+            gap: 1.5rem;
+        }
+        nav a {
+            color: var(--muted-color);
+            text-decoration: none;
+            font-size: 0.95rem;
+            transition: color 0.2s;
+        }
+        nav a:hover {
+            color: var(--accent-color);
+        }
+        section {
+            margin-bottom: 3rem;
+        }
+        h2 {
+            font-size: 1.5rem;
+            font-weight: 600;
+            margin-bottom: 1.5rem;
+            border-left: 4px solid var(--accent-color);
+            padding-left: 0.75rem;
+        }
+        .post {
+            margin-bottom: 2rem;
+            padding: 1.5rem;
+            background-color: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+        .post:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+        }
+        .post-meta {
+            font-size: 0.85rem;
+            color: var(--muted-color);
+            margin-bottom: 0.5rem;
+        }
+        .post-title {
+            font-size: 1.25rem;
+            font-weight: 600;
+            margin-bottom: 0.75rem;
+        }
+        .post-title a {
+            color: var(--text-color);
+            text-decoration: none;
+            transition: color 0.2s;
+        }
+        .post-title a:hover {
+            color: var(--accent-color);
+        }
+        .post-excerpt {
+            color: var(--muted-color);
+            font-size: 0.95rem;
+        }
+        .project-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+            gap: 1.5rem;
+        }
+        .project-card {
+            padding: 1.5rem;
+            background-color: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+        }
+        .project-name {
+            font-weight: 600;
+            margin-bottom: 0.5rem;
+            color: var(--text-color);
+        }
+        .project-desc {
+            font-size: 0.85rem;
+            color: var(--muted-color);
+        }
+        footer {
+            margin-top: 5rem;
+            border-top: 1px solid var(--border-color);
+            padding-top: 2rem;
+            text-align: center;
+            font-size: 0.85rem;
+            color: var(--muted-color);
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>Aiden Lin</h1>
+        <div class="subtitle">Distributed Systems Architect & Open Source Contributor</div>
+        <nav>
+            <a href="#">Home</a>
+            <a href="#blog">Writing</a>
+            <a href="#projects">Projects</a>
+            <a href="#about">About</a>
+        </nav>
+    </header>
+
+    <main>
+        <section id="blog">
+            <h2>Recent Writing</h2>
+            
+            <article class="post">
+                <div class="post-meta">Published on June 24, 2026 • 8 min read</div>
+                <h3 class="post-title"><a href="#">Designing High-Throughput I/O Multiplexing in Rust</a></h3>
+                <p class="post-excerpt">An in-depth look at implementing efficient non-blocking I/O operations using tokio and mio. We explore system call overhead mitigation and custom buffer allocation strategies.</p>
+            </article>
+
+            <article class="post">
+                <div class="post-meta">Published on May 12, 2026 • 12 min read</div>
+                <h3 class="post-title"><a href="#">Garbage Collection Tuning for Memory-Constrained Node.js Applications</a></h3>
+                <p class="post-excerpt">How to optimize the V8 garbage collector for micro-containers. We cover space-size parameters, manual GC invocation thresholds, and identifying heap leakage patterns.</p>
+            </article>
+
+            <article class="post">
+                <div class="post-meta">Published on April 8, 2026 • 6 min read</div>
+                <h3 class="post-title"><a href="#">The Mechanics of DNS-over-HTTPS (DoH) Client Resiliency</a></h3>
+                <p class="post-excerpt">Building fallback resolution mechanisms in system clients. We dissect the performance difference between standard UDP lookup libraries and JSON-based DOH interfaces.</p>
+            </article>
+        </section>
+
+        <section id="projects">
+            <h2>Open Source Projects</h2>
+            <div class="project-grid">
+                <div class="project-card">
+                    <div class="project-name">lite-rpc</div>
+                    <p class="project-desc">A lightweight, high-performance RPC framework built on top of HTTP/2 in Go. Zero external dependencies.</p>
+                </div>
+                <div class="project-card">
+                    <div class="project-name">fast-proxy</div>
+                    <p class="project-desc">High-performance edge router with built-in DNS-over-HTTPS client and socket pipeline stream optimization.</p>
+                </div>
+                <div class="project-card">
+                    <div class="project-name">web-builder</div>
+                    <p class="project-desc">Zero-config Javascript/CSS bundler written in Rust for parallel, multi-threaded asset processing.</p>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <footer>
+        <p>&copy; 2026 Aiden Lin. Built with clean HTML & CSS. All rights reserved.</p>
+    </footer>
+</body>
+</html>
