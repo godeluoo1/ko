@@ -1207,9 +1207,19 @@ function ipInCIDR(ip, cidr) {
 
 function isCloudflareOrLocalIP(ip) {
   if (!ip) return false;
-  if (ip === '127.0.0.1' || ip === '::1' || ip.includes('::ffff:127.0.0.1')) return true;
+  // 放行本地回环
+  if (ip === '127.0.0.1' || ip === '::1' || ip === '::' || ip.includes('::ffff:127.0.0.1')) return true;
   const ipv4 = ip.replace(/^.*:/, '');
   if (!/^\d+\.\d+\.\d+\.\d+$/.test(ipv4)) return false;
+
+  // 核心优化：放行 RFC1918 私有 IP 网段，解决 Docker 网关 (如 172.17.x.x) 及 K8s Pod (如 10.x.x.x) 的回源校验问题
+  if (ipInCIDR(ipv4, '127.0.0.0/8') || 
+      ipInCIDR(ipv4, '10.0.0.0/8') || 
+      ipInCIDR(ipv4, '172.16.0.0/12') || 
+      ipInCIDR(ipv4, '192.168.0.0/16')) {
+    return true;
+  }
+
   return CF_IPV4_RANGES.some(cidr => ipInCIDR(ipv4, cidr));
 }
 
