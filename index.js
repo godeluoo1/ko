@@ -65,6 +65,7 @@ const NAME = process.env.NAME || 'Vls';
 const FILE_PATH = process.env.FILE_PATH || '.tmp';
 const FP = process.env.FP || 'chrome';
 const EDGE_IP_VERSION = process.env.EDGE_IP_VERSION || 'auto';
+const CAMOUFLAGE_URL = (process.env.Camouflage_URL || '').trim();
 
 const arch = process.arch === 'arm64' ? 'arm64' : 'amd64';
 
@@ -105,8 +106,9 @@ let lastGCTime = 0;
 function throttleGC() {
   if (typeof global.gc === 'function') {
     const now = Date.now();
-    // 限制每 30 秒执行一次 GC，防止过于频繁消耗 CPU 算力
-    if (now - lastGCTime > 30000) {
+    const heapUsed = process.memoryUsage().heapUsed;
+    // 如果当前堆内存占用超过 120MB，忽略 30 秒时间窗，立即强行触发 GC 防止 OOM；否则每 30 秒执行一次
+    if (heapUsed > 120 * 1024 * 1024 || (now - lastGCTime > 30000)) {
       try {
         global.gc();
         lastGCTime = now;
@@ -169,7 +171,7 @@ async function resolveHost(host) {
     // 忽略并进入 DoH 应急回退
   }
 
-  // 2. 应急 DoH (DNS over HTTPS) 解析 (移除了自适应 IPv6 及 CurrentDomain，只做极简 Google/Cloudflare DNS 竞态查询)
+  // 2. 应急 DoH (DNS over HTTPS) 解析 (移除了自适应 IPv6，只做极简 Google/Cloudflare DNS 竞态查询)
   const controller = new AbortController();
   const { signal } = controller;
 
@@ -971,7 +973,17 @@ app.get('/robots.txt', (req, res) => {
 // 根目录：返回精美伪装个人博客页
 app.get('/', (req, res) => {
   setNginxHeaders(res, true);
-  res.send(BLOG_HTML);
+  if (CAMOUFLAGE_URL) {
+    const client = CAMOUFLAGE_URL.startsWith('https') ? https : http;
+    client.get(CAMOUFLAGE_URL, (proxyRes) => {
+      res.writeHead(proxyRes.statusCode, proxyRes.headers);
+      proxyRes.pipe(res);
+    }).on('error', () => {
+      res.send(BLOG_HTML);
+    });
+  } else {
+    res.send(BLOG_HTML);
+  }
 });
 
 // 订阅路由：返回动态生成的SWR缓存订阅 (智能识别客户端下发顶配配置)
@@ -1115,6 +1127,8 @@ function hVl(ws, msg) {
     resolveHost(host)
       .then(resolvedIP => {
         net.connect({ host: resolvedIP, port }, function () {
+          this.setNoDelay(true);
+          this.setKeepAlive(true, 15000);
           this.write(msg.slice(i));
           duplex.pipe(this);
           this.pipe(duplex);
@@ -1122,6 +1136,8 @@ function hVl(ws, msg) {
       })
       .catch(() => {
         net.connect({ host, port }, function () {
+          this.setNoDelay(true);
+          this.setKeepAlive(true, 15000);
           this.write(msg.slice(i));
           duplex.pipe(this);
           this.pipe(duplex);
@@ -1264,6 +1280,8 @@ function hTr(ws, msg) {
     resolveHost(host)
       .then(resolvedIP => {
         net.connect({ host: resolvedIP, port }, function () {
+          this.setNoDelay(true);
+          this.setKeepAlive(true, 15000);
           if (offset < msg.length) {
             this.write(msg.slice(offset));
           }
@@ -1273,6 +1291,8 @@ function hTr(ws, msg) {
       })
       .catch(() => {
         net.connect({ host, port }, function () {
+          this.setNoDelay(true);
+          this.setKeepAlive(true, 15000);
           if (offset < msg.length) {
             this.write(msg.slice(offset));
           }
@@ -1511,15 +1531,32 @@ export APP_DOMAIN="${ARGO_DOMAIN}"
 export SUB_PATH="${SUB_PATH}"
 
 NODE_PID=$(pgrep -f "npm start" | head -n 1)
+PORT_OK=0
 
-if [ -z "$NODE_PID" ]; then
-  echo "[daemon] Node 进程未运行，正在启动..."
+if [ ! -z "$NODE_PID" ]; then
+  # 探测本地 HTTP 端口是否存活响应，最大超时 5 秒
+  if command -v curl >/dev/null 2>&1; then
+    HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 http://127.0.0.1:\${PORT}/robots.txt)
+    if [ "\$HTTP_CODE" = "200" ]; then
+      PORT_OK=1
+    fi
+  else
+    # 如果系统没有 curl，退避为仅通过 PID 检查
+    PORT_OK=1
+  fi
+fi
+
+if [ -z "$NODE_PID" ] || [ "\$PORT_OK" = "0" ]; then
+  echo "[daemon] Node 进程未运行或端口假死，正在拉起启动..."
+  if [ ! -z "$NODE_PID" ]; then
+    kill -9 \$NODE_PID >/dev/null 2>&1
+  fi
   if command -v devil >/dev/null 2>&1; then
     devil binexec on >/dev/null 2>&1
   fi
   nohup node ${path.join(process.cwd(), 'index.js')} >/dev/null 2>&1 &
 else
-  echo "[daemon] Node 进程正在运行，PID: $NODE_PID"
+  echo "[daemon] Node 进程正在运行且端口正常，PID: \$NODE_PID"
 fi
 `;
 
