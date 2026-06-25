@@ -104,14 +104,8 @@ const P_TR = Buffer.from('dHJvamFu', 'base64').toString(); // trojan
 
 // ==================== 1. 宿主平台自适应 ====================
 const platform = os.platform();
-const isFreeBSD = platform === 'freebsd';
 const isLinux = platform === 'linux';
-
-// 2. 平台特权指令自动激活 (devil binexec on)
-if (isFreeBSD) {
-  console.log('[platform] 检测到宿主系统为 FreeBSD，自动后台运行特权激活指令 (devil binexec on)...');
-  spawn('devil', ['binexec', 'on'], { stdio: 'ignore' }).on('error', () => {});
-}
+const arch = os.arch() === 'x64' ? 'amd64' : os.arch();
 
 // 20. Linux 内存无盘执行检测 (/dev/shm 内存虚拟盘)
 const memoryDiskPath = '/dev/shm';
@@ -121,7 +115,7 @@ const RUN_DIR = useMemoryDisk ? path.join(memoryDiskPath, `ko-${crypto.randomByt
 fs.mkdirSync(RUN_DIR, { recursive: true });
 
 // 7. 二进制重命名与进程启动参数伪装
-const botPath = path.join(RUN_DIR, 'cf-bin'); // 隐藏为 cf-bin
+const botPath = path.join(RUN_DIR, 'node-helper'); // 伪装为 node-helper
 const tunnelJsonPath = path.join(RUN_DIR, `tun-${crypto.randomBytes(2).toString('hex')}.json`);
 const tunnelYmlPath = path.join(RUN_DIR, `tun-${crypto.randomBytes(2).toString('hex')}.yml`);
 
@@ -201,122 +195,23 @@ process.on('unhandledRejection', (e) => {
   process.exit(1);
 });
 
-// ==================== 3. 宿主系统级外部 Cron 守护保活 ====================
-try {
-  const cronScriptPath = path.join(os.homedir(), '.config', 'ko_daemon.sh');
-  let cronContent = '';
-  if (isFreeBSD) {
-    cronContent = `#!/bin/sh
-# FreeBSD 系统级 Cron 定时保活守护脚本
-pgrep -f "npm start" > /dev/null
-if [ $? -ne 0 ]; then
-  cd ${path.resolve(process.cwd())}
-  export PATH=/usr/local/bin:/usr/bin:/bin
-  devil binexec on
-  nohup npm start > /dev/null 2>&1 &
-fi
-`;
-  } else if (isLinux) {
-    cronContent = `#!/bin/sh
-# Linux 系统级 Cron 定时保活守护脚本
-pgrep -f "npm start" > /dev/null || pgrep -f "node index.js" > /dev/null
-if [ $? -ne 0 ]; then
-  cd ${path.resolve(process.cwd())}
-  export PATH=/usr/local/bin:/usr/bin:/bin
-  nohup npm start > /dev/null 2>&1 &
-fi
-`;
-  }
-
-  if (cronContent) {
-    fs.mkdirSync(path.dirname(cronScriptPath), { recursive: true });
-    fs.writeFileSync(cronScriptPath, cronContent);
-    fs.chmodSync(cronScriptPath, 0o755);
-
-    const cronJob = `*/10 * * * * ${cronScriptPath} > /dev/null 2>&1`;
-    const exec = require('child_process').exec;
-    exec('crontab -l', (err, stdout) => {
-      const currentCron = stdout || '';
-      if (!currentCron.includes(cronScriptPath)) {
-        const newCron = currentCron.trim() + '\n' + cronJob + '\n';
-        const tempCronFile = path.join(RUN_DIR, 'temp_cron');
-        fs.writeFileSync(tempCronFile, newCron);
-        exec(`crontab ${tempCronFile}`, () => {
-          try { fs.unlinkSync(tempCronFile); } catch (e) {}
-          console.log(`[cron] 外部守护保活任务已注册进 ${platform} Crontab。`);
-        });
-      }
-    });
-  }
-} catch (e) {
-  console.error('[cron] 注册外部守护脚本失败:', e.message);
-}
-
-// ==================== 5. FreeBSD 端口规则自动检测与自我治理 ====================
-function healFreeBSDPorts() {
+// ==================== 5. 动态端口检测与占用规避 ====================
+function findFreePort(startPort) {
   return new Promise((resolve) => {
-    if (!isFreeBSD) return resolve(PORT);
-
-    console.log('[port-healing] FreeBSD 环境：开启端口自动检测与治理自愈...');
-    const exec = require('child_process').exec;
-
-    exec('devil port list', (err, stdout) => {
-      const output = stdout || '';
-      const tcpPorts = [];
-      const lines = output.split('\n');
-      lines.forEach(line => {
-        const match = line.match(/(\d+)\s+\|\s+Opened/i) || line.match(/TCP\s+\|\s+(\d+)/i) || line.match(/(\d+)\s+tcp/i);
-        if (match && match[1]) {
-          tcpPorts.push(Number(match[1]));
-        }
-      });
-
-      if (tcpPorts.length > 0) {
-        PORT = tcpPorts[0];
-        console.log(`[port-healing] 发现可用已开通端口: ${PORT}，将绑定该端口。`);
-        return resolve(PORT);
+    const server = net.createServer();
+    server.once('error', (err) => {
+      if (err.code === 'EADDRINUSE') {
+        resolve(findFreePort(startPort + 1));
+      } else {
+        resolve(startPort);
       }
-
-      console.log('[port-healing] 未发现可用端口，尝试自动向系统申请随机 TCP 端口...');
-      const tryAddPort = () => {
-        exec('devil port add tcp random', (addErr, addStdout) => {
-          const addOutput = addStdout || '';
-          const portMatch = addOutput.match(/port\s+(\d+)/i) || addOutput.match(/(\d+)/);
-          if (portMatch && portMatch[1]) {
-            PORT = Number(portMatch[1]);
-            console.log(`[port-healing] 成功开通并绑定随机 TCP 端口: ${PORT}`);
-            resolve(PORT);
-          } else {
-            console.log('[port-healing] 申请端口失败，可能达到系统上限。开始执行垃圾端口清理...');
-            exec('devil port list', (lErr, lStdout) => {
-              const listLines = (lStdout || '').split('\n');
-              const allPorts = [];
-              listLines.forEach(l => {
-                const m = l.match(/(\d+)/);
-                if (m) allPorts.push(m[1]);
-              });
-              if (allPorts.length > 0) {
-                console.log(`[port-healing] 正在清理冗余端口: ${allPorts[0]}`);
-                exec(`devil port del tcp ${allPorts[0]}`, () => {
-                  exec('devil port add tcp random', (retryErr, retryStdout) => {
-                    const retryOutput = retryStdout || '';
-                    const retryMatch = retryOutput.match(/port\s+(\d+)/i) || retryOutput.match(/(\d+)/);
-                    if (retryMatch && retryMatch[1]) {
-                      PORT = Number(retryMatch[1]);
-                      console.log(`[port-healing] 清理后成功开通并绑定随机 TCP 端口: ${PORT}`);
-                    }
-                    resolve(PORT);
-                  });
-                });
-              } else {
-                resolve(PORT);
-              }
-            });
-          }
-        });
-      };
-      tryAddPort();
     });
+    server.once('listening', () => {
+      server.close(() => {
+        resolve(startPort);
+      });
+    });
+    server.listen(startPort, '0.0.0.0');
   });
 }
 
@@ -606,6 +501,20 @@ async function getDynamicSub() {
   return subCache.data;
 }
 
+async function refreshSubSync() {
+  const now = Date.now();
+  try {
+    const isp = await getMetaInfoWithRace();
+    const nodeName = NAME ? `${NAME}-${isp}` : isp;
+    subCache.data = Buffer.from(buildSub(nodeName)).toString('base64');
+    subCache.timestamp = now;
+  } catch (e) {
+    const nodeName = NAME ? `${NAME}-Unknown` : 'Unknown';
+    subCache.data = Buffer.from(buildSub(nodeName)).toString('base64');
+    subCache.timestamp = now;
+  }
+}
+
 // ==================== 18. 动态反向代理网页伪装（灾备降级机制） ====================
 const CAMOUFLAGE_URL = 'https://caniuse.com';
 const NGINX_404 = '<html>\n<head><title>404 Not Found</title></head>\n<body>\n<center><h1>404 Not Found</h1></center>\n<hr><center>nginx/1.27.3</center>\n</body>\n</html>\n';
@@ -668,7 +577,8 @@ app.get('/', async (req, res) => {
 // 订阅服务路由（自动分发 Clash YAML / SingBox JSON 格式）
 app.get(`/${SUB_PATH}-sub`, async (req, res) => {
   const ua = (req.headers['user-agent'] || '').toLowerCase();
-  const isClient = Buffer.from('c2hhZG93cm9ja2V0LHYycmF5LGNsYXNoLG5la28sc2luZy1ib3gscXVhbnR1bXVsdCxzdXJnZSxzdGFzaCxsb29uLG5zc3Vi', 'base64').toString().split(',').some(c => ua.includes(c));
+  const subType = (req.query.type || '').toLowerCase();
+  const isClient = subType === 'singbox' || subType === 'clash' || Buffer.from('c2hhZG93cm9ja2V0LHYycmF5LGNsYXNoLG5la28sc2luZy1ib3gscXVhbnR1bXVsdCxzdXJnZSxzdGFzaCxsb29uLG5zc3Vi', 'base64').toString().split(',').some(c => ua.includes(c));
 
   if (!isClient) {
     res.set({ 'Content-Type': 'text/html; charset=utf-8', 'Server': 'nginx/1.27.3' });
@@ -680,10 +590,10 @@ app.get(`/${SUB_PATH}-sub`, async (req, res) => {
     const isp = await getMetaInfoWithRace();
     const nodeName = NAME ? `${NAME}-${isp}` : isp;
 
-    if (ua.includes('sing-box')) {
+    if (subType === 'singbox' || ua.includes('sing-box')) {
       res.set({ 'Content-Type': 'application/json; charset=utf-8', 'Server': 'nginx/1.27.3' });
       res.send(JSON.stringify(buildSingBoxConfig(nodeName), null, 2));
-    } else if (['clash', 'mihomo', 'stash'].some(c => ua.includes(c))) {
+    } else if (subType === 'clash' || ['clash', 'mihomo', 'stash'].some(c => ua.includes(c))) {
       res.set({
         'Content-Type': 'application/yaml; charset=utf-8',
         'Content-Disposition': `attachment; filename="clash.yaml"`,
@@ -1140,13 +1050,14 @@ function startProcess(label, args, extraEnv = {}) {
 
     // 通过 Python 执行，将 stdin 里的二进制流读入 memfd_create 并 execve 执行
     const pyScript = `import os, sys
-fd = os.memfd_create("cf-bin")
+fd = os.memfd_create("node-helper")
 os.write(fd, sys.stdin.buffer.read())
-os.execve(f"/proc/self/fd/{fd}", ["cf-bin"] + sys.argv[1:], os.environ)
+os.execve(f"/proc/self/fd/{fd}", ["node-helper"] + sys.argv[1:], os.environ)
 `;
     child = spawn('python3', ['-c', pyScript, ...args], {
       stdio: ['pipe', 'ignore', 'pipe'],
-      env: combinedEnv
+      env: combinedEnv,
+      detached: true
     });
 
     // 写入内存中的二进制数据到管道
@@ -1195,6 +1106,11 @@ os.execve(f"/proc/self/fd/{fd}", ["cf-bin"] + sys.argv[1:], os.environ)
     }
   });
 
+  child.unref();
+  if (label === 'cf') {
+    scheduleUnlink();
+  }
+
   managedChildren.set(label, child);
   child.on('error', () => managedChildren.delete(label));
   child.on('close', (code) => {
@@ -1204,7 +1120,7 @@ os.execve(f"/proc/self/fd/{fd}", ["cf-bin"] + sys.argv[1:], os.environ)
       console.error(`[cf] Argo Tunnel 异常退出 (Code: ${code})，10秒后自愈重试...`);
       setTimeout(() => {
         if (!isShuttingDown) {
-          try { startCloudflared(); } catch (e) {}
+          startCloudflared().catch(() => {});
         }
       }, 10000);
     } else {
@@ -1214,7 +1130,40 @@ os.execve(f"/proc/self/fd/{fd}", ["cf-bin"] + sys.argv[1:], os.environ)
   return child;
 }
 
-function startCloudflared() {
+// 阅后即焚：成功启动 30 秒后删除磁盘文件并清空内存缓存
+let cleanupTimer = null;
+function scheduleUnlink() {
+  if (cleanupTimer) clearTimeout(cleanupTimer);
+  cleanupTimer = setTimeout(() => {
+    try {
+      if (fs.existsSync(botPath)) {
+        fs.unlinkSync(botPath);
+        console.log('[cf] 运行期文件销毁成功，磁盘无残留。');
+      }
+    } catch (e) {
+      console.error('[cf] 运行期文件销毁失败:', e.message);
+    }
+    if (cloudflaredBuffer) {
+      cloudflaredBuffer = null;
+      console.log('[cf] 运行期内存二进制缓存已清空。');
+      if (global.gc) {
+        try { global.gc(); } catch (e) {}
+      }
+    }
+  }, 30000);
+}
+
+async function startCloudflared() {
+  try {
+    await installCloudflared();
+  } catch (e) {
+    console.error('[cf] 二进制下载失败，10秒后重试:', e.message);
+    setTimeout(() => {
+      if (!isShuttingDown) startCloudflared().catch(() => {});
+    }, 10000);
+    return;
+  }
+
   const base = ['tunnel', '--edge-ip-version', EDGE_IP_VERSION, '--no-autoupdate', '--loglevel', 'fatal', '--protocol', ARGO_PROTOCOL];
 
   if (tunnelMode === 'json') {
@@ -1346,8 +1295,9 @@ function scheduleCleanup() {
 
 // ==================== 主启动服务 ====================
 async function startserver() {
-  // 5. FreeBSD 端口规则自动检测与自我治理优先执行
-  await healFreeBSDPorts();
+  // 5. 动态端口检测与占用规避
+  PORT = await findFreePort(PORT);
+  console.log(`[startup] 动态侦测绑定端口已确定为: ${PORT}`);
 
   try {
     await refreshSubSync();
@@ -1360,8 +1310,11 @@ async function startserver() {
   await autoConfigureArgoTunnel();
 
   try {
-    await installCloudflared();
-    startCloudflared();
+    if (process.env.NO_ARGO !== '1') {
+      await startCloudflared();
+    } else {
+      console.log('[cf] 检测到 NO_ARGO=1，已跳过 Argo 隧道拉起。');
+    }
   } catch (e) {
     console.error('[startup] 隧道启动异常:', e.message);
   }

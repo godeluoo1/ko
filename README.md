@@ -1,86 +1,86 @@
 # ko
 
-极致精简的云原生无内核 PaaS 隧道内网穿透网关与分流服务。基于原生 Node.js 内存分流，支持双向流式高性能 Web 数据转发与 0-RTT 早期数据响应，内建自适应回压控制、内存无盘匿名执行以及高级主动探测伪装防御，零磁盘文件残留。
+极致精简的云原生边缘 Ingress 流量分流器与静态博客服务 — 原生 Node.js 内存分流，支持双向流式高性能 Web 数据转发与 0-RTT 早期数据响应，内建自适应背压控制，集成 Argo 隧道自愈防崩溃，零磁盘残留。
 
 ## 架构
 
-```text
+```
 ┌────────┐      ┌────────┐      ┌─────────────┐      ┌───────────┐      ┌────────┐
 │ Client │─TLS─▶│ CF CDN │─────▶│ CF Tunnel   │─────▶│  Node.js  │─────▶│ Target │
 │        │      │        │      │(cloudflared)│      │(内存分流) │      │        │
 └────────┘      └────────┘      └─────────────┘      └───────────┘      └────────┘
-                                                    同一端口内部分流 (如 3000)
+                                                       127.0.0.1:8001
 ```
 
 ## 核心设计原则
 
 | 原则 | 实现 |
 |------|------|
-| **原生零内核** | 纯 Node.js 原生代码进行数据解析与 TCP/UDP 流量中转，免去任何第三方可执行内核（如 Xray）写盘，零文件特征残留，极度轻量。 |
-| **单端口全服务复用** | 将 WebSocket 升级与 Express 路由整合进同一个 HTTP 服务实例。Argo 隧道启动时只需代理单个本地端口，大幅简化 Ingress 配置，完美兼容 Quick Tunnel。 |
-| **Linux 内存无盘执行** | 自动检测 Linux 环境，通过 Python `memfd_create` 系统调用将 `cloudflared` 写入匿名内存描述符并直接运行，实现物理磁盘零写盘特征。不支持时优雅降级为 `/dev/shm` 运行。 |
-| **动态伪装与 Nginx 对齐** | 根路径请求实时反向代理外部真实高权重网站，在遇到网络故障时毫秒级灾备降级回退至毛玻璃博客；响应头部指纹深度对齐 Nginx。 |
-| **FreeBSD 自愈与系统守护** | 针对 FreeBSD (Serv00) 自动探测可用端口、清理冗余并申请随机端口进行绑定；自动写入 Cron 脚本至 Crontab 实现每 10 分钟系统级保活。 |
-| **V8 GC 限制自拉起** | 启动时自动检测运行参数，若缺失 `--expose-gc` 等参数则自动以限制内存为 256MB 的优化参数重新拉起进程，并在内存超出 200MB 阈值时触发熔断优雅退出。 |
-| **流量包长度分片混淆** | 数据回发客户端前，通过自定义 `FragmentTransform` 流，随机切分成 150 字节至 1300 字节不等的 WebSocket 帧发送，破坏流分类指纹特征。 |
-| **回压控制与超时保护** | 建立连接时强限制 3 秒 WS 握手硬超时和 30 秒 HTTP 超时，防止挂死探测。传输采用 `pipeline` 异步回压控制，保障高负载下内存 RSS 稳定在 100MB 以内。 |
-| **IP 匿名化保护** | 在原生数据包接收与转发过程中，主动拦截并清洗请求头中的 `X-Forwarded-For`、`CF-Connecting-IP` 等敏感追踪头部。 |
+| **极致性能与无痕** | 纯 Node.js 内存拦截解析高性能数据转发，免去任何第三方二进制写盘，零文件特征残留，极度轻量。 |
+| **极速鉴权比对** | 采用全局启动时 UUID 二进制缓存与 Trojan 哈希预计算，避开每次连接握手的 CPU 密集型字符串循环与实时哈希运算，握手校验交由底层 C++ 快速 Buffer 比较处理，响应极其灵敏。 |
+| **极致稳定 (防重启)** | Argo 隧道进程异常退出退避守护（10秒后台自愈重连），Node 进程常驻运行在外部映射端口（如 3008），彻底切断因隧道网络瞬断而导致的容器无限重启和代码丢失。 |
+| **自适应数据分流** | 系统根据传入流量路径，自动将 Web 静态渲染与加密数据中转管道分离，大幅隐蔽 TLS 频繁握手的指纹特征。 |
+| **0-RTT 极速启动** | 服务端原生提取并解码 WebSocket 早期数据（Early Data），进行前置拼包合流，让首包时延直接砍半。 |
+| **主动探测防御** | 对非法探测流量执行随机 150ms~600ms 的伪装延迟，并回吐高端拟物静态个人博客 HTML，零漏入特征。 |
 
 ## 环境变量
 
-### 一键极简导入 (推荐)
+### 必填
 
 | 变量 | 说明 |
 |------|------|
-| `CONFIG_BASE64` | 将 UUID、Tunnel 凭证和域名打包成 JSON 后进行 Base64 编码的一键导入变量（省去配置多个环境变量）。 |
+| `APP_KEY` | 系统运行与安全数据校验密钥 (UUID)（必须手动设置，无默认值） |
+| `API_TOKEN` | Cloudflare Tunnel Token 或 JSON 凭证（不支持临时隧道） |
+| `APP_DOMAIN` | Tunnel 绑定的服务域名（如 `service.example.com`） |
 
-* **Base64 对应的 JSON 格式配置样例**：
-  ```json
-  {
-    "key": "你的UUID",
-    "token": "你的Argo-Tunnel-Token",
-    "domain": "service.example.com",
-    "subPath": "自定义订阅路径"
-  }
-  ```
+### 可选
 
----
-
-### 传统分步导入
-
-#### 必填
-| 变量 | 说明 |
-|------|------|
-| `APP_KEY` | 系统运行与安全数据校验密钥 (UUID)（未设置时将自动随机生成安全 UUID） |
-| `API_TOKEN` | Cloudflare Tunnel Token 或 JSON 凭证（不支持临时隧道时，可用作认证） |
-| `APP_DOMAIN` | Tunnel 绑定的服务域名（如 `service.example.com`，使用 Quick Tunnel 时可留空） |
-
-#### 可选
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `PORT` | `3000` | Web 服务和伪装主页监听端口（FreeBSD 下由系统自动治理和绑定） |
+| `PORT` | `3000` | Web 服务和伪装主页监听端口 |
+| `BACKEND_PORT` | `8001` | 后端数据分流端口 |
 | `TUNNEL_PROTO` | `http2` | Tunnel 传输协议（`http2` / `quic`） |
-| `CDN_HOST` | `saas.sin.fan` | 节点生成时指定的 CF CDN 优选接入域名 |
-| `CDN_PORT` | `443` | 节点生成时指定的 CF CDN 优选接入端口 |
+| `CDN_HOST` | `saas.sin.fan` | 优选接入节点 / 域名 |
+| `CDN_PORT` | `443` | 优选接入端口 |
 | `NAME` | `Vls` | 服务备注名称前缀 |
-| `SUB_PATH` | *UUID前8位* | 代理连接路径与服务订阅路径（无前导 `/`） |
-| `FILE_PATH` | `.tmp` | 运行时临时数据目录（Linux 下将自动使用共享内存虚拟盘运行） |
+| `SUB_PATH` | `godeluoo` | 数据查询与健康检查路径（无前导 `/`） |
+| `FILE_PATH` | `.tmp` | 运行时临时数据目录 |
 | `FP` | `chrome` | 浏览器 TLS 指纹模拟类型 |
 | `EDGE_IP_VERSION` | `auto` | Tunnel 边缘 IP 版本 |
 
-## 订阅服务与客户端配置
+## 数据同步与健康检查
 
-```text
-https://<你的Argo域名>/<SUB_PATH>-sub
+```
+https://<APP_DOMAIN>/<SUB_PATH>
 ```
 
-服务会根据客户端请求的 `User-Agent`（或者请求参数 `?type=`）智能进行本地内存化配置适配：
-1. **Clash / Stash 客户端**：自动生成完整的 Clash YAML 节点与策略组配置文件，并将 DNS 解析强制指向 CF DoH 以防止客户端本地 DNS 污染。
-2. **Sing-box 客户端**：自动生成原生的 Sing-box JSON 格式配置文件（包含出站、DNS 及规则分流设置）。
-3. **通用客户端 (如 Shadowrocket / v2rayN)**：返回经过 Base64 编码的轻量级 VLESS/Trojan 订阅连接信息。
+默认路径：`/godeluoo`。服务会根据客户端请求 of User-Agent 智能进行格式适配：
+1. **通用文本流**：返回经过 Base64 编码的轻量级连接信息列表。
+2. **结构化 YAML 流**：直接生成符合特定分析器规范的完整 YAML 格式系统运维配置文件。
 
-## 安全与稳定保证
+## 稳定特性
 
-- **自动保活**：冷启动延迟 10 秒（避开瞬间安全网络审计），之后以 4~8 分钟的随机间隔发起无害本地请求防止容器休眠。
-- **进程自愈**：`cf-bin` 进程若闪退，Node 主进程静默启动 10s 倒计时自动拉起，容器永不停止。
-- **零残留**：在捕获到退出信号（SIGTERM/SIGINT）时，优雅清理所有子进程并删除磁盘上的全部临时配置，不留痕迹。
+| 特性 | 说明 |
+|------|------|
+| 隧道自愈重试 | `cloudflared` 子进程退出后，主程序启动 10s 倒计时静默拉起，不引发 Node 崩溃退出。 |
+| 优雅关闭 | SIGTERM → 5s 超时 → SIGKILL，清理所有子进程，资源不泄漏。 |
+| 优雅兜底 | `uncaughtException` / `unhandledRejection` 均触发退出。 |
+| 自动保活 | 随机时间间隔（4~8分钟）自保活访问模拟流量。 |
+
+## Docker 部署
+
+```bash
+docker run -d --name ko-service --restart=always \
+  -e APP_KEY="你的UUID" \
+  -e API_TOKEN="你的Tunnel-Token" \
+  -e APP_DOMAIN="service.example.com" \
+  -e NAME="MyNode" \
+  node:18 sh -c "rm -rf /app && (git clone https://github.com/godeluoo1/ko.git /app || (echo 'Clone failed, waiting for manual code sync...' && while [ ! -f /app/index.js ]; do sleep 2; done)) && cd /app && npm install && node --expose-gc index.js"
+```
+
+## 安全提示
+
+- **切勿**使用默认 UUID，务必生成唯一值
+- **切勿**在公开仓库暴露 `API_TOKEN`
+- `SUB_PATH` 建议修改为难以猜测的自定义路径
+- 配置文件包含敏感鉴权信息，请妥善保管，不要分享
