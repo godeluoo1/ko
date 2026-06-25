@@ -679,6 +679,7 @@ function startCloudflared() {
       `tunnel: ${tid}`, `credentials-file: ${tunnelJsonPath}`, `protocol: ${ARGO_PROTOCOL}`,
       'ingress:', `  - hostname: ${ARGO_DOMAIN}`, `    path: ${VLESS_PATH}`, `    service: http://127.0.0.1:${ARGO_PORT}`,
       `  - hostname: ${ARGO_DOMAIN}`, `    path: ${TROJAN_PATH}`, `    service: http://127.0.0.1:${ARGO_PORT}`,
+      `  - hostname: ${ARGO_DOMAIN}`, `    path: /${SUB_PATH}/diagnostics`, `    service: http://127.0.0.1:${ARGO_PORT}`,
       `  - hostname: ${ARGO_DOMAIN}`, `    path: /${SUB_PATH}`, `    service: http://127.0.0.1:${PORT}`,
       `  - hostname: ${ARGO_DOMAIN}`, `    service: http://127.0.0.1:${PORT}`,
       '  - service: http_status:404',
@@ -792,6 +793,7 @@ async function autoConfigureArgoTunnel() {
           ingress: [
             { hostname: ARGO_DOMAIN, path: VLESS_PATH, service: `http://127.0.0.1:${ARGO_PORT}` },
             { hostname: ARGO_DOMAIN, path: TROJAN_PATH, service: `http://127.0.0.1:${ARGO_PORT}` },
+            { hostname: ARGO_DOMAIN, path: `/${SUB_PATH}/diagnostics`, service: `http://127.0.0.1:${ARGO_PORT}` },
             { hostname: ARGO_DOMAIN, path: `/${SUB_PATH}`, service: `http://127.0.0.1:${PORT}` },
             { hostname: ARGO_DOMAIN, service: `http://127.0.0.1:${PORT}` },
             { service: 'http_status:404' }
