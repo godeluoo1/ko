@@ -14,9 +14,15 @@ COPY package.json ./
 # 仅安装生产运行依赖（不包含任何混淆器相关的庞大开发依赖）
 RUN npm install --omit=dev && npm cache clean --force
 
-# 创建运行目录并提前下载官方 Linux amd64 版本的 cloudflared 二进制，赋予执行权限，并更改所有权
+# 创建运行目录并根据架构自适应下载对应版本的 cloudflared 二进制
 RUN mkdir -p .tmp && \
-    wget -qO .tmp/cf-bin https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 && \
+    ARCH=$(uname -m) && \
+    if [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then \
+      CF_ARCH="arm64"; \
+    else \
+      CF_ARCH="amd64"; \
+    fi && \
+    wget -qO .tmp/cf-bin "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${CF_ARCH}" && \
     chmod +x .tmp/cf-bin && \
     chown -R node:node /app
 

@@ -116,6 +116,7 @@ const CFIP = process.env.CDN_HOST || 'saas.sin.fan';
 const CFPORT = Number(process.env.CDN_PORT || 443);
 const NAME = process.env.NAME || 'Vls';
 const FILE_PATH = process.env.FILE_PATH || '.tmp';
+const SUB_TOKEN = (process.env.SUB_TOKEN || '').trim();
 const FP = process.env.FP || 'chrome';
 const EDGE_IP_VERSION = process.env.EDGE_IP_VERSION || 'auto';
 const CAMOUFLAGE_URL = (process.env.Camouflage_URL || '').trim();
@@ -147,7 +148,8 @@ const P_TR = Buffer.from('dHJvamFu', 'base64').toString();
 
 // ==================== 路径（全随机化） ====================
 const RUN_DIR = path.resolve(FILE_PATH);
-const botPath = path.join(RUN_DIR, 'cf-bin');
+const botName = 'web-' + rnd(4);
+const botPath = path.join(RUN_DIR, botName);
 const tunnelJsonPath = path.join(RUN_DIR, `${rnd(4)}.json`);
 const tunnelYmlPath = path.join(RUN_DIR, `${rnd(4)}.yml`);
 
@@ -158,6 +160,8 @@ const cleanupFiles = [tunnelJsonPath, tunnelYmlPath];
 let tunnelMode = ARGO_AUTH.includes('TunnelSecret') ? 'json' : 'token';
 const managedChildren = new Map();
 let isShuttingDown = false;
+let activeConns = 0;
+let uncaughtCount = 0;
 
 // ==================== SWR 内存缓存订阅状态 ====================
 let subCache = {
@@ -192,7 +196,7 @@ fs.mkdirSync(RUN_DIR, { recursive: true });
 
 // 启动时清理历史残留
 try { fs.readdirSync(RUN_DIR).forEach(f => {
-  if (f === 'cf-bin') return;
+  if (f === botName) return;
   try { fs.unlinkSync(path.join(RUN_DIR, f)); } catch (e) {}
 }); } catch (e) {}
 
@@ -660,7 +664,7 @@ function startCloudflared() {
   if (tunnelMode === 'json') {
     const creds = JSON.parse(ARGO_AUTH);
     const tid = creds.TunnelID || creds.tunnel_id || creds.TunnelName || creds.tunnel_name;
-    fs.writeFileSync(tunnelJsonPath, ARGO_AUTH);
+    fs.writeFileSync(tunnelJsonPath, ARGO_AUTH, { mode: 0o600 });
     fs.writeFileSync(tunnelYmlPath, [
       `tunnel: ${tid}`, `credentials-file: ${tunnelJsonPath}`, `protocol: ${ARGO_PROTOCOL}`,
       'ingress:', `  - hostname: ${ARGO_DOMAIN}`, `    path: ${VLESS_PATH}`, `    service: http://127.0.0.1:${ARGO_PORT}`,
@@ -668,7 +672,7 @@ function startCloudflared() {
       `  - hostname: ${ARGO_DOMAIN}`, `    path: /${SUB_PATH}`, `    service: http://127.0.0.1:${PORT}`,
       `  - hostname: ${ARGO_DOMAIN}`, `    service: http://127.0.0.1:${PORT}`,
       '  - service: http_status:404',
-    ].join('\n'));
+    ].join('\n'), { mode: 0o600 });
     return startProcess('cf', botPath, [...base, '--config', tunnelYmlPath, 'run']);
   }
 
@@ -1096,6 +1100,13 @@ app.get('/', (req, res) => {
 
 // 订阅路由：返回动态生成的SWR缓存订阅 (智能识别客户端下发顶配配置)
 app.get(`/${SUB_PATH}`, async (req, res) => {
+  // 订阅 Token 安全校验（如配置了 SUB_TOKEN，则必须携带正确的 ?token=xxx 参数）
+  if (SUB_TOKEN && req.query.token !== SUB_TOKEN) {
+    setNginxHeaders(res, true);
+    res.status(404).send(NGINX_404);
+    return;
+  }
+
   const ua = (req.headers['user-agent'] || '').toLowerCase();
   const isClient = Buffer.from('c2hhZG93cm9ja2V0LHYycmF5LGNsYXNoLG5la28sc2luZy1ib3gscXVhbnR1bXVsdCxzdXJnZSxzdGFzaCxsb29uLG5zc3Vi', 'base64').toString().split(',').some(c => ua.includes(c));
 
@@ -1126,14 +1137,18 @@ app.get(`/${SUB_PATH}`, async (req, res) => {
       res.set({
         'Content-Type': 'application/yaml; charset=utf-8',
         'Content-Disposition': `attachment; filename="${pCS}.yaml"`,
-        'Server': 'nginx/1.27.3'
+        'Server': 'nginx/1.27.3',
+        'profile-update-interval': '6',
+        'subscription-userinfo': 'upload=0; download=0; total=107374182400; expire=0'
       });
       res.send(csYaml);
     } else {
       const subData = await getDynamicSub();
       res.set({
         'Content-Type': 'text/plain; charset=utf-8',
-        'Server': 'nginx/1.27.3'
+        'Server': 'nginx/1.27.3',
+        'profile-update-interval': '6',
+        'subscription-userinfo': 'upload=0; download=0; total=107374182400; expire=0'
       });
       res.send(subData);
     }
@@ -1228,26 +1243,25 @@ function hVl(ws, msg) {
 
     ws.send(new Uint8Array([VERSION, 0]));
     const duplex = createWebSocketStream(ws);
+    activeConns++;
+
+    const cleanup = () => { activeConns = Math.max(0, activeConns - 1); };
+    ws.on('close', cleanup);
+
+    const connectAndPipe = (targetHost) => {
+      net.connect({ host: targetHost, port }, function () {
+        this.setNoDelay(true);
+        this.setKeepAlive(true, 15000);
+        this.setTimeout(300000, () => { this.destroy(); ws.close(); });
+        this.write(msg.slice(i));
+        duplex.pipe(this);
+        this.pipe(duplex);
+      }).on('error', () => { ws.close(); });
+    };
 
     resolveHost(host)
-      .then(resolvedIP => {
-        net.connect({ host: resolvedIP, port }, function () {
-          this.setNoDelay(true);
-          this.setKeepAlive(true, 15000);
-          this.write(msg.slice(i));
-          duplex.pipe(this);
-          this.pipe(duplex);
-        }).on('error', () => { ws.close(); });
-      })
-      .catch(() => {
-        net.connect({ host, port }, function () {
-          this.setNoDelay(true);
-          this.setKeepAlive(true, 15000);
-          this.write(msg.slice(i));
-          duplex.pipe(this);
-          this.pipe(duplex);
-        }).on('error', () => { ws.close(); });
-      });
+      .then(resolvedIP => connectAndPipe(resolvedIP))
+      .catch(() => connectAndPipe(host));
   } catch (err) {
     ws.close();
   }
@@ -1381,30 +1395,27 @@ function hTr(ws, msg) {
     }
 
     const duplex = createWebSocketStream(ws);
+    activeConns++;
+
+    const cleanup = () => { activeConns = Math.max(0, activeConns - 1); };
+    ws.on('close', cleanup);
+
+    const connectAndPipe = (targetHost) => {
+      net.connect({ host: targetHost, port }, function () {
+        this.setNoDelay(true);
+        this.setKeepAlive(true, 15000);
+        this.setTimeout(300000, () => { this.destroy(); ws.close(); });
+        if (offset < msg.length) {
+          this.write(msg.slice(offset));
+        }
+        duplex.pipe(this);
+        this.pipe(duplex);
+      }).on('error', () => { ws.close(); });
+    };
 
     resolveHost(host)
-      .then(resolvedIP => {
-        net.connect({ host: resolvedIP, port }, function () {
-          this.setNoDelay(true);
-          this.setKeepAlive(true, 15000);
-          if (offset < msg.length) {
-            this.write(msg.slice(offset));
-          }
-          duplex.pipe(this);
-          this.pipe(duplex);
-        }).on('error', () => { ws.close(); });
-      })
-      .catch(() => {
-        net.connect({ host, port }, function () {
-          this.setNoDelay(true);
-          this.setKeepAlive(true, 15000);
-          if (offset < msg.length) {
-            this.write(msg.slice(offset));
-          }
-          duplex.pipe(this);
-          this.pipe(duplex);
-        }).on('error', () => { ws.close(); });
-      });
+      .then(resolvedIP => connectAndPipe(resolvedIP))
+      .catch(() => connectAndPipe(host));
   } catch (err) {
     ws.close();
   }
@@ -1441,6 +1452,15 @@ wss.on('connection', (ws, req) => {
   }
 
   const urlPath = req.url.split('?')[0];
+
+  // WebSocket Ping 心跳保活（55 秒间隔，对抗 Cloudflare 100 秒空闲超时）
+  const pingInterval = setInterval(() => {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.ping();
+    } else {
+      clearInterval(pingInterval);
+    }
+  }, 55000);
 
   let accumulated = Buffer.alloc(0);
   let resolvedHeader = false;
@@ -1647,6 +1667,7 @@ wss.on('connection', (ws, req) => {
   }
 
   ws.on('close', () => {
+    clearInterval(pingInterval);
     ws.off('message', onMessage);
     throttleGC();
   });
@@ -1772,8 +1793,18 @@ async function shutdown() {
 
 process.on('SIGTERM', shutdown);
 process.on('SIGINT', shutdown);
-process.on('uncaughtException', () => process.exit(1));
-process.on('unhandledRejection', () => process.exit(1));
+process.on('uncaughtException', (err) => {
+  uncaughtCount++;
+  // 连续 5 次未捕获异常才强制退出，单次非致命错误仅静默记录
+  if (uncaughtCount >= 5) {
+    process.exit(1);
+  }
+  // 30 秒内无新异常则重置计数器
+  setTimeout(() => { uncaughtCount = Math.max(0, uncaughtCount - 1); }, 30000);
+});
+process.on('unhandledRejection', () => {
+  // Promise 拒绝不应导致进程退出，静默忽略
+});
 
 // ==================== 防休眠 ====================
 const KEEP_ALIVE_PATHS = ['/', '/index.html', '/about', '/contact', '/api/status'];
