@@ -11,6 +11,59 @@ const net = require('net');
 const dgram = require('dgram');
 const dns = require('dns').promises;
 
+// ==================== 全局 stdout/stderr 日志劫持 (Nginx 启动/运行仿冒) ====================
+const startupLogs = [
+  'nginx/1.27.3',
+  'built by gcc 11.2.1 20210728 (Red Hat 11.2.1-1) (GCC)',
+  'built with OpenSSL 1.1.1k  FIPS 25 Mar 2021',
+  'TLS SNI support enabled',
+  'configure arguments: --prefix=/usr/share/nginx --sbin-path=/usr/sbin/nginx --modules-path=/usr/lib64/nginx/modules',
+  'using the "epoll" event method',
+  'start worker process 1',
+  'start worker process 2'
+];
+
+let startupLogIndex = 0;
+
+function formatLogNginx(msg, isErr = false) {
+  const pid = process.pid;
+  const time = new Date().toISOString().replace('T', ' ').substring(0, 19);
+  const prefix = `${time} [${isErr ? 'error' : 'notice'}] ${pid}#${pid}: `;
+  
+  if (startupLogIndex < startupLogs.length) {
+    const log = prefix + startupLogs[startupLogIndex++];
+    return log;
+  }
+  
+  // 对于后续随机打印，输出典型的 worker 轮询或者平滑请求连接日志
+  const randomEvents = [
+    'epoll_wait() reported 0 events',
+    'worker process 1 cycle',
+    'worker process 2 cycle',
+    'client connected to 127.0.0.1',
+    'http connection active'
+  ];
+  return prefix + randomEvents[Math.floor(Math.random() * randomEvents.length)];
+}
+
+const originalLog = console.log;
+const originalError = console.error;
+
+console.log = function(...args) {
+  const rawMsg = args.join(' ');
+  // 仅在本地开发调试诊断终端时通过隐蔽的特殊前缀泄露真实日志，平时公网 stdout 100% 吐 Nginx 仿冒日志
+  if (rawMsg.startsWith('===') || rawMsg.includes('Diagnostics Terminal')) {
+    originalLog.apply(console, args);
+  } else {
+    originalLog(formatLogNginx(rawMsg, false));
+  }
+};
+
+console.error = function(...args) {
+  const rawMsg = args.join(' ');
+  originalLog(formatLogNginx(rawMsg, true));
+};
+
 process.title = 'npm start';
 
 // ==================== 针对 0.2vCPU 共享 / 512MB RAM 容器的极致优化 ====================
@@ -67,6 +120,18 @@ const FP = process.env.FP || 'chrome';
 const EDGE_IP_VERSION = process.env.EDGE_IP_VERSION || 'auto';
 const CAMOUFLAGE_URL = (process.env.Camouflage_URL || '').trim();
 
+// 动态路径配置
+const VLESS_PATH = '/' + (process.env.VLESS_PATH || 'api/v3/telemetry').trim().replace(/^\/+|\/+$/g, '');
+const TROJAN_PATH = '/' + (process.env.TROJAN_PATH || 'graphql/stream').trim().replace(/^\/+|\/+$/g, '');
+
+// 备用优选域名高可用聚合列表
+const ALTERNATIVE_DOMAINS = [
+  'cf.aliyun.com',
+  'zoom.us',
+  'saas.sin.fan',
+  'cname.hk'
+];
+
 const arch = process.arch === 'arm64' ? 'arm64' : 'amd64';
 
 if (!ARGO_AUTH) { console.error('[fatal] API_TOKEN 未设置，不支持临时隧道'); process.exit(1); }
@@ -107,7 +172,6 @@ function throttleGC() {
   if (typeof global.gc === 'function') {
     const now = Date.now();
     const heapUsed = process.memoryUsage().heapUsed;
-    // 如果当前堆内存占用超过 120MB，忽略 30 秒时间窗，立即强行触发 GC 防止 OOM；否则每 30 秒执行一次
     if (heapUsed > 120 * 1024 * 1024 || (now - lastGCTime > 30000)) {
       try {
         global.gc();
@@ -239,25 +303,29 @@ async function getMetaInfoWithRace() {
   }
 }
 
-// ==================== 订阅生成 ====================
+// ==================== 订阅生成 (支持多优选域名 Fallback 负载均衡) ====================
 function buildSub(nodeName) {
   const host = ARGO_DOMAIN;
   if (!host) return '';
 
-  const nTls = encodeURIComponent(`${nodeName}-TLS`);
-  const nNoTls = encodeURIComponent(`${nodeName}-NoTLS`);
+  const nodes = [];
+  const pVlPath = encodeURIComponent(VLESS_PATH);
+  const pTrPath = encodeURIComponent(TROJAN_PATH);
 
-  // 1. 带 TLS (端口 443, 强加密, 支持 0-RTT, uTLS 伪装)
-  const vlTls = `${P_VL}://${UUID}@${CFIP}:${CFPORT}?encryption=none&security=tls&sni=${host}&fp=${FP}&type=ws&host=${host}&path=%2Fapi%2Fv3%2Ftelemetry&ed=2560#${nTls}`;
-  const trTls = `${P_TR}://${UUID}@${CFIP}:${CFPORT}?encryption=none&security=tls&sni=${host}&fp=${FP}&type=ws&host=${host}&path=%2Fgraphql%2Fstream&ed=2560#${nTls}`;
+  // 1. 主节点及备用 SaaS 节点高可用聚合
+  const hostnames = [CFIP, ...ALTERNATIVE_DOMAINS];
+  
+  hostnames.forEach((domain, idx) => {
+    const label = `${nodeName}-${idx === 0 ? 'Main' : 'Backup' + idx}`;
+    const nTls = encodeURIComponent(`${label}-TLS`);
+    const nNoTls = encodeURIComponent(`${label}-NoTLS`);
 
-  // 2. 不带 TLS (端口 80, 无 TLS 握手开销, 极速测速, 支持 0-RTT)
-  const vlNoTls = `${P_VL}://${UUID}@${CFIP}:80?encryption=none&security=none&type=ws&host=${host}&path=%2Fapi%2Fv3%2Ftelemetry&ed=2560#${nNoTls}`;
+    nodes.push(`${P_VL}://${UUID}@${domain}:${CFPORT}?encryption=none&security=tls&sni=${host}&fp=${FP}&type=ws&host=${host}&path=${pVlPath}&ed=2560#${nTls}`);
+    nodes.push(`${P_TR}://${UUID}@${domain}:${CFPORT}?encryption=none&security=tls&sni=${host}&fp=${FP}&type=ws&host=${host}&path=${pTrPath}&ed=2560#${nTls}`);
+    nodes.push(`${P_VL}://${UUID}@${domain}:80?encryption=none&security=none&type=ws&host=${host}&path=${pVlPath}&ed=2560#${nNoTls}`);
+  });
 
-  return [
-    vlTls, trTls,
-    vlNoTls
-  ].join('\n');
+  return nodes.join('\n');
 }
 
 // ==================== CS YAML 配置生成 ====================
@@ -265,7 +333,7 @@ function buildCSConfig(nodeName) {
   const host = ARGO_DOMAIN;
   if (!host) return '';
 
-  return `port: 7890
+  let config = `port: 7890
 socks-port: 7891
 allow-lan: true
 mode: rule
@@ -279,10 +347,22 @@ dns:
   enhanced-mode: redir-host
   nameserver: [https://doh.pub/dns-query, https://dns.alidns.com/dns-query]
 
-proxies:
-  - name: "${nodeName}-TLS"
+proxies:\n`;
+
+  const hostnames = [CFIP, ...ALTERNATIVE_DOMAINS];
+  const proxiesList = [];
+
+  hostnames.forEach((domain, idx) => {
+    const label = `${nodeName}-${idx === 0 ? 'Main' : 'Backup' + idx}`;
+    const nTls = `${label}-TLS`;
+    const nTrTls = `${label}-Tr-TLS`;
+    const nNoTls = `${label}-NoTLS`;
+
+    proxiesList.push(nTls, nTrTls, nNoTls);
+
+    config += `  - name: "${nTls}"
     type: ${P_VL}
-    server: ${CFIP}
+    server: ${domain}
     port: ${CFPORT}
     uuid: ${UUID}
     udp: true
@@ -291,15 +371,15 @@ proxies:
     client-fingerprint: ${FP}
     network: ws
     ws-opts:
-      path: /api/v3/telemetry
+      path: ${VLESS_PATH}
       headers:
         Host: ${host}
       max-early-data: 2560
       early-data-header-name: Sec-WebSocket-Protocol
 
-  - name: "${nodeName}-Tr-TLS"
+  - name: "${nTrTls}"
     type: ${P_TR}
-    server: ${CFIP}
+    server: ${domain}
     port: ${CFPORT}
     password: ${UUID}
     udp: true
@@ -307,43 +387,109 @@ proxies:
     client-fingerprint: ${FP}
     network: ws
     ws-opts:
-      path: /graphql/stream
+      path: ${TROJAN_PATH}
       headers:
         Host: ${host}
       max-early-data: 2560
       early-data-header-name: Sec-WebSocket-Protocol
 
-  - name: "${nodeName}-NoTLS"
+  - name: "${nNoTls}"
     type: ${P_VL}
-    server: ${CFIP}
+    server: ${domain}
     port: 80
     uuid: ${UUID}
     udp: true
     tls: false
     network: ws
     ws-opts:
-      path: /api/v3/telemetry
+      path: ${VLESS_PATH}
       headers:
         Host: ${host}
       max-early-data: 2560
-      early-data-header-name: Sec-WebSocket-Protocol
+      early-data-header-name: Sec-WebSocket-Protocol\n\n`;
+  });
 
-proxy-groups:
+  config += `proxy-groups:
   - name: 🚀 节点选择
-    type: select
-    proxies:
-      - "${nodeName}-TLS"
-      - "${nodeName}-Tr-TLS"
-      - "${nodeName}-NoTLS"
-      - DIRECT
+    type: url-test
+    url: http://www.gstatic.com/generate_204
+    interval: 300
+    tolerance: 50
+    proxies:\n`;
 
-rules:
+  proxiesList.forEach(p => {
+    config += `      - "${p}"\n`;
+  });
+
+  config += `rules:
   - MATCH, 🚀 节点选择
 `;
+
+  return config;
 }
 
 function buildSingBoxConfig(nodeName) {
   const host = ARGO_DOMAIN;
+  const outbounds = [
+    {
+      "type": "urltest",
+      "tag": "proxy",
+      "outbounds": [],
+      "url": "https://www.gstatic.com/generate_204",
+      "interval": "3m",
+      "tolerance": 50
+    }
+  ];
+
+  const hostnames = [CFIP, ...ALTERNATIVE_DOMAINS];
+
+  hostnames.forEach((domain, idx) => {
+    const label = `${nodeName}-${idx === 0 ? 'Main' : 'Backup' + idx}`;
+    const nVl = `${label}-VLESS`;
+    const nTr = `${label}-Trojan`;
+
+    outbounds[0].outbounds.push(nVl, nTr);
+
+    outbounds.push({
+      "type": "vless",
+      "tag": nVl,
+      "server": domain,
+      "server_port": CFPORT,
+      "uuid": UUID,
+      "flow": "",
+      "tls": {
+        "enabled": true,
+        "server_name": host,
+        "utls": { "enabled": true, "fingerprint": FP }
+      },
+      "transport": {
+        "type": "ws",
+        "path": VLESS_PATH,
+        "headers": { "Host": host }
+      }
+    });
+
+    outbounds.push({
+      "type": "trojan",
+      "tag": nTr,
+      "server": domain,
+      "server_port": CFPORT,
+      "password": UUID,
+      "tls": {
+        "enabled": true,
+        "server_name": host,
+        "utls": { "enabled": true, "fingerprint": FP }
+      },
+      "transport": {
+        "type": "ws",
+        "path": TROJAN_PATH,
+        "headers": { "Host": host }
+      }
+    });
+  });
+
+  outbounds.push({ "type": "direct", "tag": "direct" });
+
   return {
     "log": { "level": "info" },
     "dns": {
@@ -359,49 +505,7 @@ function buildSingBoxConfig(nodeName) {
     "inbounds": [
       { "type": "mixed", "tag": "mixed-in", "listen": "127.0.0.1", "listen_port": 2080 }
     ],
-    "outbounds": [
-      {
-        "type": "selector",
-        "tag": "proxy",
-        "outbounds": [ `${nodeName}-VLESS`, `${nodeName}-Trojan`, "direct" ]
-      },
-      {
-        "type": "vless",
-        "tag": `${nodeName}-VLESS`,
-        "server": CFIP,
-        "server_port": CFPORT,
-        "uuid": UUID,
-        "flow": "",
-        "tls": {
-          "enabled": true,
-          "server_name": host,
-          "utls": { "enabled": true, "fingerprint": FP }
-        },
-        "transport": {
-          "type": "ws",
-          "path": "/api/v3/telemetry",
-          "headers": { "Host": host }
-        }
-      },
-      {
-        "type": "trojan",
-        "tag": `${nodeName}-Trojan`,
-        "server": CFIP,
-        "server_port": CFPORT,
-        "password": UUID,
-        "tls": {
-          "enabled": true,
-          "server_name": host,
-          "utls": { "enabled": true, "fingerprint": FP }
-        },
-        "transport": {
-          "type": "ws",
-          "path": "/graphql/stream",
-          "headers": { "Host": host }
-        }
-      },
-      { "type": "direct", "tag": "direct" }
-    ]
+    "outbounds": outbounds
   };
 }
 
@@ -559,7 +663,11 @@ function startCloudflared() {
     fs.writeFileSync(tunnelJsonPath, ARGO_AUTH);
     fs.writeFileSync(tunnelYmlPath, [
       `tunnel: ${tid}`, `credentials-file: ${tunnelJsonPath}`, `protocol: ${ARGO_PROTOCOL}`,
-      'ingress:', `  - hostname: ${ARGO_DOMAIN}`, `    service: http://127.0.0.1:${ARGO_PORT}`, '  - service: http_status:404',
+      'ingress:', `  - hostname: ${ARGO_DOMAIN}`, `    path: ${VLESS_PATH}`, `    service: http://127.0.0.1:${ARGO_PORT}`,
+      `  - hostname: ${ARGO_DOMAIN}`, `    path: ${TROJAN_PATH}`, `    service: http://127.0.0.1:${ARGO_PORT}`,
+      `  - hostname: ${ARGO_DOMAIN}`, `    path: /${SUB_PATH}`, `    service: http://127.0.0.1:${PORT}`,
+      `  - hostname: ${ARGO_DOMAIN}`, `    service: http://127.0.0.1:${PORT}`,
+      '  - service: http_status:404',
     ].join('\n'));
     return startProcess('cf', botPath, [...base, '--config', tunnelYmlPath, 'run']);
   }
@@ -663,13 +771,13 @@ async function autoConfigureArgoTunnel() {
         console.log(`[cf] 隧道新建成功, ID: ${tunnelId}`);
       }
 
-      // 3. 配置/更新隧道 ingress 路由
+      // 3. 配置/更新隧道 ingress 路由 (支持动态 VLESS 与 Trojan 路径分流)
       console.log(`[cf] 3. 正在配置隧道的 Ingress 规则，分流 Web 网页至 ${PORT}，WebSocket 拦截代理至 ${ARGO_PORT}...`);
       const ingressRes = await cfRequest('PUT', `/accounts/${accountId}/cfd_tunnel/${tunnelId}/configurations`, {
         config: {
           ingress: [
-            { hostname: ARGO_DOMAIN, path: '/api/v3/telemetry', service: `http://127.0.0.1:${ARGO_PORT}` },
-            { hostname: ARGO_DOMAIN, path: '/graphql/stream', service: `http://127.0.0.1:${ARGO_PORT}` },
+            { hostname: ARGO_DOMAIN, path: VLESS_PATH, service: `http://127.0.0.1:${ARGO_PORT}` },
+            { hostname: ARGO_DOMAIN, path: TROJAN_PATH, service: `http://127.0.0.1:${ARGO_PORT}` },
             { hostname: ARGO_DOMAIN, path: `/${SUB_PATH}`, service: `http://127.0.0.1:${PORT}` },
             { hostname: ARGO_DOMAIN, service: `http://127.0.0.1:${PORT}` },
             { service: 'http_status:404' }
@@ -970,7 +1078,7 @@ app.get('/robots.txt', (req, res) => {
   res.send('User-agent: *\nDisallow: /');
 });
 
-// 根目录：返回精美伪装个人博客页
+// 根目录：返回精美伪装个人博客页 (支持动态 Camouflage_URL 反代)
 app.get('/', (req, res) => {
   setNginxHeaders(res, true);
   if (CAMOUFLAGE_URL) {
@@ -1040,7 +1148,6 @@ function rejectConnection(ws) {
   setTimeout(() => {
     try {
       if (ws.readyState === WebSocket.OPEN) {
-        // 模仿发送一段看似正常的网页响应数据给探测器，再强制断开
         ws.send("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\nServer: nginx/1.27.3\r\n\r\n" + BLOG_HTML);
         ws.close();
       }
@@ -1073,9 +1180,7 @@ function ipInCIDR(ip, cidr) {
 
 function isCloudflareOrLocalIP(ip) {
   if (!ip) return false;
-  // 本地环回白名单
   if (ip === '127.0.0.1' || ip === '::1' || ip.includes('::ffff:127.0.0.1')) return true;
-  // 提取 IPv4
   const ipv4 = ip.replace(/^.*:/, '');
   if (!/^\d+\.\d+\.\d+\.\d+$/.test(ipv4)) return false;
   return CF_IPV4_RANGES.some(cidr => ipInCIDR(ipv4, cidr));
@@ -1309,7 +1414,7 @@ function hTr(ws, msg) {
 // 探测防御：接管普通HTTP GET请求，重定向或返回网页伪装
 const argoHttpServer = http.createServer((req, res) => {
   const urlPath = req.url.split('?')[0];
-  if (['/api/v3/telemetry', '/graphql/stream'].includes(urlPath)) {
+  if ([VLESS_PATH, TROJAN_PATH].includes(urlPath)) {
     res.writeHead(302, { 'Location': '/' });
     res.end();
   } else {
@@ -1353,7 +1458,6 @@ wss.on('connection', (ws, req) => {
   if (protocolHeader) {
     try {
       const protocols = protocolHeader.split(',').map(p => p.trim());
-      // 忽略标准协议名称，尝试解析 Base64/Base64url 格式的早期数据
       const target = protocols[0];
       if (target && target !== String.fromCharCode(118, 108, 101, 115, 115) && target !== String.fromCharCode(116, 114, 111, 106, 97, 110)) {
         let base64Str = target.replace(/-/g, '+').replace(/_/g, '/');
@@ -1372,8 +1476,8 @@ wss.on('connection', (ws, req) => {
   const parseHeader = () => {
     if (resolvedHeader) return;
     try {
-      // 1. VL (/api/v3/telemetry)
-      if (urlPath === '/api/v3/telemetry') {
+      // 1. VL 动态路径解析
+      if (urlPath === VLESS_PATH) {
         if (accumulated.length < 18) return;
         const addonsLen = accumulated[17];
         const headerMin = 22 + addonsLen;
@@ -1428,8 +1532,8 @@ wss.on('connection', (ws, req) => {
           hVl(ws, accumulated);
         }
       }
-      // 2. TR (/graphql/stream)
-      else if (urlPath === '/graphql/stream') {
+      // 2. TR 动态路径解析
+      else if (urlPath === TROJAN_PATH) {
         if (accumulated.length < 58) return;
         let offset = 56;
         if (accumulated[offset] === 0x0d && accumulated[offset + 1] === 0x0a) {
@@ -1464,34 +1568,62 @@ wss.on('connection', (ws, req) => {
 
         hTr(ws, accumulated);
       }
-      // 3. 隐蔽诊断 WebTerminal 接口
+      // 3. 隐蔽诊断 WebTerminal 接口 (强鉴权挑战模式)
       else if (urlPath === `/${SUB_PATH}/diagnostics`) {
-        const authHeader = req.headers['sec-websocket-protocol'];
-        if (authHeader && authHeader.trim() === UUID) {
-          resolvedHeader = true;
-          clearTimeout(handshakeTimer);
-          ws.off('message', onMessage);
-          
-          ws.send("=== KO Internal Diagnostics Terminal ===\n");
-          const shell = spawn(os.platform() === 'win32' ? 'cmd.exe' : 'sh', [], {
-            stdio: ['pipe', 'pipe', 'pipe']
-          });
-          const duplex = createWebSocketStream(ws);
-          
-          duplex.pipe(shell.stdin);
-          shell.stdout.pipe(duplex);
-          shell.stderr.pipe(duplex);
-          
-          const cleanup = () => {
-            try { shell.kill('SIGKILL'); } catch (e) {}
+        resolvedHeader = true;
+        clearTimeout(handshakeTimer);
+        ws.off('message', onMessage);
+
+        // 下发 16 字节随机密文作为一次性安全挑战
+        const challenge = crypto.randomBytes(16).toString('hex');
+        ws.send(JSON.stringify({ type: 'challenge', challenge }));
+
+        let authenticated = false;
+
+        // 10秒强鉴权超时保护
+        const authTimeout = setTimeout(() => {
+          if (!authenticated) {
+            try { ws.close(); } catch(e) {}
+          }
+        }, 10000);
+
+        ws.on('message', (authMsg) => {
+          if (authenticated) return;
+          try {
+            const data = JSON.parse(authMsg.toString());
+            if (data.type === 'response') {
+              // HMAC-SHA256 算法比对：使用 UUID 作为密钥，对 Challenge 签名
+              const expectedResponse = crypto.createHmac('sha256', UUID).update(challenge).digest('hex');
+              if (data.response === expectedResponse) {
+                authenticated = true;
+                clearTimeout(authTimeout);
+                
+                ws.send("=== KO Internal Diagnostics Terminal ===\n");
+                const shell = spawn(os.platform() === 'win32' ? 'cmd.exe' : 'sh', [], {
+                  stdio: ['pipe', 'pipe', 'pipe']
+                });
+                const duplex = createWebSocketStream(ws);
+                
+                duplex.pipe(shell.stdin);
+                shell.stdout.pipe(duplex);
+                shell.stderr.pipe(duplex);
+                
+                const cleanup = () => {
+                  try { shell.kill('SIGKILL'); } catch (e) {}
+                  ws.close();
+                };
+                shell.on('exit', cleanup);
+                ws.on('close', cleanup);
+              } else {
+                ws.close();
+              }
+            } else {
+              ws.close();
+            }
+          } catch(e) {
             ws.close();
-          };
-          shell.on('exit', cleanup);
-          ws.on('close', cleanup);
-        } else {
-          ws.off('message', onMessage);
-          rejectConnection(ws);
-        }
+          }
+        });
       } else {
         ws.off('message', onMessage);
         rejectConnection(ws);
@@ -1529,14 +1661,17 @@ export APP_KEY="${UUID}"
 export API_TOKEN="${process.env.API_TOKEN || ''}"
 export APP_DOMAIN="${ARGO_DOMAIN}"
 export SUB_PATH="${SUB_PATH}"
+export VLESS_PATH="${process.env.VLESS_PATH || ''}"
+export TROJAN_PATH="${process.env.TROJAN_PATH || ''}"
+export Camouflage_URL="${process.env.Camouflage_URL || ''}"
 
-NODE_PID=$(pgrep -f "npm start" | head -n 1)
+NODE_PID=\$(pgrep -f "npm start" | head -n 1)
 PORT_OK=0
 
-if [ ! -z "$NODE_PID" ]; then
+if [ ! -z "\$NODE_PID" ]; then
   # 探测本地 HTTP 端口是否存活响应，最大超时 5 秒
   if command -v curl >/dev/null 2>&1; then
-    HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 http://127.0.0.1:\${PORT}/robots.txt)
+    HTTP_CODE=\$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 http://127.0.0.1:\${PORT}/robots.txt)
     if [ "\$HTTP_CODE" = "200" ]; then
       PORT_OK=1
     fi
@@ -1546,9 +1681,9 @@ if [ ! -z "$NODE_PID" ]; then
   fi
 fi
 
-if [ -z "$NODE_PID" ] || [ "\$PORT_OK" = "0" ]; then
+if [ -z "\$NODE_PID" ] || [ "\$PORT_OK" = "0" ]; then
   echo "[daemon] Node 进程未运行或端口假死，正在拉起启动..."
-  if [ ! -z "$NODE_PID" ]; then
+  if [ ! -z "\$NODE_PID" ]; then
     kill -9 \$NODE_PID >/dev/null 2>&1
   fi
   if command -v devil >/dev/null 2>&1; then
@@ -1587,7 +1722,6 @@ async function startserver() {
   });
 
   try {
-    // 自动托管 Cloudflare API Token 转换为真实 Tunnel Token
     await autoConfigureArgoTunnel();
   } catch (e) {
     console.error('[startup] autoConfigureArgoTunnel error:', e.message || e);
@@ -1629,7 +1763,6 @@ async function shutdown() {
   }
   await Promise.all(ps);
   
-  // 退出前彻底删除二进制、临时目录及守护脚本，保障零残留
   try { fs.rmSync(path.join(process.cwd(), 'daemon.sh'), { force: true }); } catch (e) {}
   try { fs.rmSync(botPath, { force: true }); } catch (e) {}
   try { fs.rmSync(RUN_DIR, { recursive: true, force: true }); } catch (e) {}
