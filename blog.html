@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="zh-CN" data-scroll-behavior="smooth">
+<html lang="zh-CN">
 <head>
     <meta charset="utf-8"/>
     <meta name="viewport" content="width=device-width, initial-scale=1"/>
@@ -18,6 +18,7 @@
             --border-color: #e2e8e4;
             --tag-bg: #eef1ee;
             --glow: rgba(43, 58, 48, 0.05);
+            --modal-overlay: rgba(247, 248, 244, 0.95);
         }
         @media (prefers-color-scheme: dark) {
             :root {
@@ -29,6 +30,7 @@
                 --border-color: #2b312d;
                 --tag-bg: #232925;
                 --glow: rgba(255, 255, 255, 0.03);
+                --modal-overlay: rgba(17, 20, 18, 0.98);
             }
         }
         * {
@@ -136,6 +138,7 @@
             font-size: 0.95rem;
             font-weight: 600;
             transition: all 0.2s;
+            cursor: pointer;
         }
         .primary-link {
             background-color: var(--accent-color);
@@ -170,26 +173,21 @@
             color: var(--muted-color);
         }
         .hero-visual {
-            background-color: var(--card-bg);
+            background-image: url('https://images.unsplash.com/photo-1514888286974-6c03e2ca1dba?q=80&w=600&auto=format&fit=crop');
+            background-size: cover;
+            background-position: center;
             border: 1px solid var(--border-color);
             border-radius: 12px;
             aspect-ratio: 1;
-            display: flex;
-            align-items: center;
-            justify-content: center;
             box-shadow: 0 10px 30px var(--glow);
             position: relative;
             overflow: hidden;
-        }
-        .hero-visual::before {
-            content: '✏️';
-            font-size: 5rem;
-            opacity: 0.8;
         }
         .archive-board {
             display: grid;
             grid-template-columns: 240px 1fr;
             gap: 3rem;
+            margin-top: 2rem;
         }
         @media (max-width: 768px) {
             .archive-board {
@@ -254,6 +252,7 @@
             padding: 2rem;
             transition: transform 0.2s, box-shadow 0.2s;
             position: relative;
+            cursor: pointer;
         }
         .post-card:hover {
             transform: translateY(-2px);
@@ -270,13 +269,9 @@
             font-size: 1.35rem;
             font-weight: 600;
             margin-bottom: 1rem;
-        }
-        .post-card h3 a {
             color: var(--text-color);
-            text-decoration: none;
-            transition: color 0.2s;
         }
-        .post-card h3 a:hover {
+        .post-card h3:hover {
             color: var(--accent-color);
         }
         .post-card p {
@@ -314,6 +309,54 @@
                 text-align: center;
             }
         }
+        /* 弹出式文章阅读器 */
+        .reader-modal {
+            position: fixed;
+            inset: 0;
+            background-color: var(--modal-overlay);
+            z-index: 100;
+            display: none;
+            overflow-y: auto;
+            padding: 4rem 2rem;
+            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px);
+        }
+        .reader-content {
+            max-width: 700px;
+            margin: 0 auto;
+            position: relative;
+        }
+        .close-btn {
+            position: fixed;
+            top: 2rem;
+            right: 2rem;
+            background-color: var(--tag-bg);
+            border: 1px solid var(--border-color);
+            color: var(--text-color);
+            padding: 0.5rem 1rem;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: 600;
+            font-size: 0.9rem;
+            transition: all 0.2s;
+        }
+        .close-btn:hover {
+            opacity: 0.8;
+        }
+        .reader-body {
+            margin-top: 2rem;
+            font-size: 1.1rem;
+            line-height: 1.8;
+            font-weight: 300;
+        }
+        .reader-body p {
+            margin-bottom: 1.5rem;
+        }
+        .reader-body h4 {
+            font-size: 1.4rem;
+            margin: 2rem 0 1rem;
+            font-weight: 600;
+        }
     </style>
 </head>
 <body>
@@ -338,7 +381,7 @@
                 <h1>在猫咪打盹的间隙，记录技术、生活与逐渐清楚的想法。</h1>
                 <p class="hero-summary">这里写代码、设计、阅读和养猫日常。页面保持安静，像一张靠窗的书桌：猫在旁边，想法也有地方落脚。</p>
                 <div class="hero-actions">
-                    <a class="primary-link" href="#posts">读最新文章</a>
+                    <a class="primary-link" onclick="openArticle(0)">读最新文章</a>
                     <a class="secondary-link" href="#posts">浏览全部</a>
                 </div>
                 <div class="hero-stats">
@@ -376,12 +419,12 @@
             </aside>
 
             <section class="post-list">
-                <article class="post-card">
+                <article class="post-card" onclick="openArticle(0)">
                     <div class="post-meta">
                         <time>2026年4月29日</time>
                         <span>2 分钟阅读</span>
                     </div>
-                    <h3><a href="#">搭一个猫旁也能长期写下去的博客</a></h3>
+                    <h3>搭一个猫旁也能长期写下去的博客</h3>
                     <p>个人博客不需要复杂系统。对我来说，它更像猫窝旁的一张书桌：入口清楚、节奏稳定、随时能坐下来写。</p>
                     <div class="tag-row">
                         <span class="tag">博客</span>
@@ -390,12 +433,12 @@
                     </div>
                 </article>
 
-                <article class="post-card">
+                <article class="post-card" onclick="openArticle(1)">
                     <div class="post-meta">
                         <time>2026年4月18日</time>
                         <span>2 分钟阅读</span>
                     </div>
-                    <h3><a href="#">界面安静下来以后，猫也愿意停留</a></h3>
+                    <h3>界面安静下来以后，猫也愿意停留</h3>
                     <p>现代感不一定来自更强的装饰，也可以来自更清楚的秩序、更少的打扰和更稳的排版。</p>
                     <div class="tag-row">
                         <span class="tag">设计</span>
@@ -404,12 +447,12 @@
                     </div>
                 </article>
 
-                <article class="post-card">
+                <article class="post-card" onclick="openArticle(2)">
                     <div class="post-meta">
                         <time>2026年3月30日</time>
                         <span>2 分钟阅读</span>
                     </div>
-                    <h3><a href="#">猫旁笔记的第一性原则</a></h3>
+                    <h3>猫旁笔记的第一性原则</h3>
                     <p>笔记不是为了收藏信息，而是为了让未来的自己更快恢复上下文。最好连猫从键盘旁走过时，也不至于忘了刚才想到哪里。</p>
                     <div class="tag-row">
                         <span class="tag">笔记</span>
@@ -421,9 +464,74 @@
         </div>
     </main>
 
+    <!-- 弹窗阅读器结构 -->
+    <div class="reader-modal" id="readerModal">
+        <button class="close-btn" onclick="closeArticle()">关闭返回</button>
+        <div class="reader-content">
+            <div class="post-meta" id="modalMeta"></div>
+            <h1 id="modalTitle" style="font-size: 2.2rem; line-height: 1.3; margin-bottom: 1.5rem;"></h1>
+            <hr style="border: 0; border-top: 1px solid var(--border-color);">
+            <div class="reader-body" id="modalBody"></div>
+        </div>
+    </div>
+
     <footer>
         <p>猫旁笔记 - 一个爱猫人士记录技术、设计、生活观察与日常灵感的中文个人博客。</p>
         <p>&copy; 2026. Built with clean HTML & CSS. All rights reserved.</p>
     </footer>
+
+    <script>
+        const articles = [
+            {
+                title: "搭一个猫旁也能长期写下去的博客",
+                meta: "发布于 2026年4月29日 • 2 分钟阅读",
+                content: `
+                    <p>个人博客不需要繁琐而复杂的系统。现在许多人在搭建博客时，往往花在折腾框架、配置数据库、搭建后台上的时间，远比真正坐在屏幕前敲字的时间要多得多。对我来说，博客更像是一个安静的角落，就像猫窝旁边的一张木书桌：入口清楚、节奏稳定、随时能坐下来写。</p>
+                    <h4>为什么坚持极简静态化？</h4>
+                    <p>当一个站点没有任何数据库依赖时，它几乎是坚不可摧的，而且速度极快。Node.js 配合简单的 HTML/CSS 能够让我们完全自主掌控页面上的每一个像素。没有了后台登录系统的诱惑，我只需要用 Markdown 或纯 HTML 写下我的想法，然后保存。没有评论区的喧嚣，也没有统计代码的打扰。</p>
+                    <h4>猫咪与写作的结合</h4>
+                    <p>每当我坐在键盘前，我的猫咪咪总是喜欢卧在我的右手边，或者试图在我的键盘上踩上两脚。为了不打扰它的睡眠，我不得不精简我的打字动作，甚至减少一些无关的窗口折腾。这反而让我变得更加专注。写作的本质就是与自己的内心对话，在这个过程中，旁边有一只均匀呼吸的毛茸茸生物，是再好不过的陪伴。</p>
+                `
+            },
+            {
+                title: "界面安静下来以后，猫也愿意停留",
+                meta: "发布于 2026年4月18日 • 2 分钟阅读",
+                content: `
+                    <p>我们似乎正处于一个充斥着各种视觉噪音的互联网时代。满屏的弹窗、闪烁的动画、以及各处为了吸引注意力的色彩。这些设计不仅消耗了读者的注意力，也打破了阅读应有的沉浸感。</p>
+                    <h4>设计的克制</h4>
+                    <p>安静的现代感并不来自更强烈的渐变或更复杂的动效，而是来自于秩序。当我们将间距调宽、换用经典的无衬线字体，并限制界面中的颜色数量时，信息本身的结构就会自然浮现。</p>
+                    <p>我们采用了一种符合“护眼与深夜阅读”的柔和对比色调，让页面在明暗模式下都像一张不反光的纸张。当界面不再有闪烁的干扰时，阅读就重新变成了一种享受。不仅读者能够静下心来，甚至连我的猫也愿意在屏幕旁的温暖区域多停留一会儿。</p>
+                `
+            },
+            {
+                title: "猫旁笔记的第一性原则",
+                meta: "发布于 2026年3月30日 • 2 分钟阅读",
+                content: `
+                    <p>作为开发者，我们每天都会产生大量的临时想法和代码草稿。很多人习惯把这些想法收藏到各种笔记软件里，但结果往往是“收藏后就再也没打开过”。</p>
+                    <h4>什么是第一性原则？</h4>
+                    <p>笔记唯一的衡量指标，是<b>“在未来的某一天，你能多快恢复当前的思考上下文”</b>。我们写笔记，不是为了向别人展示，也不是为了建立庞大的知识库，而是为了防止在思路被打断（比如猫咪跳上大腿、或者突然有电话接入）时，能在重新回到桌前的一秒钟内，立刻记起刚刚进行到了哪一步。</p>
+                    <h4>实践方法</h4>
+                    <p>保持每一篇笔记的极简性，不需要分类，也不需要复杂的标签。只需要一段清晰的背景描述、几行核心的代码段，以及明确的下一步代办。用最少的字符，重建最清晰的上下文。这才是最有效率的知识记录方式。</p>
+                `
+            }
+        ];
+
+        function openArticle(index) {
+            const article = articles[index];
+            document.getElementById('modalTitle').innerText = article.title;
+            document.getElementById('modalMeta').innerText = article.meta;
+            document.getElementById('modalBody').innerHTML = article.content;
+            
+            const modal = document.getElementById('readerModal');
+            modal.style.display = 'block';
+            document.body.style.overflow = 'hidden'; // 阻止背景滚动
+        }
+
+        function closeArticle() {
+            const modal = document.getElementById('readerModal');
+            modal.style.display = 'none';
+            document.body.style.overflow = 'auto'; // 恢复背景滚动
+        }
+    </script>
 </body>
 </html>
