@@ -1058,20 +1058,39 @@ function hVl(ws, msg) {
 
     ws.send(new Uint8Array([VERSION, 0]));
     const duplex = createWebSocketStream(ws);
-    activeConns++;
+    duplex.on('error', (err) => {
+      if (err.message && err.message.includes('WebSocket is not open')) return;
+      console.error('[vless-tcp] Duplex error:', err.message);
+    });
 
-    const cleanup = () => { activeConns = Math.max(0, activeConns - 1); };
+    activeConns++;
+    let socket = null;
+
+    const cleanup = () => {
+      activeConns = Math.max(0, activeConns - 1);
+      if (socket) {
+        try { socket.destroy(); } catch (e) {}
+      }
+    };
     ws.on('close', cleanup);
+    ws.on('error', () => { ws.close(); });
 
     const connectAndPipe = (targetHost) => {
-      net.connect({ host: targetHost, port }, function () {
+      socket = net.connect({ host: targetHost, port }, function () {
         this.setNoDelay(true);
         this.setKeepAlive(true, 15000);
         this.setTimeout(300000, () => { this.destroy(); ws.close(); });
         this.write(msg.slice(i));
         duplex.pipe(this);
         this.pipe(duplex);
-      }).on('error', () => { ws.close(); });
+      });
+
+      socket.on('error', (err) => {
+        ws.close();
+      });
+      socket.on('close', () => {
+        ws.close();
+      });
     };
 
     resolveHost(host)
@@ -1147,7 +1166,10 @@ function hVlU(ws, initialMsg, offset, host, port) {
 
     udpSocket.on('error', cleanup);
     udpSocket.on('close', cleanup);
-    duplex.on('error', cleanup);
+    duplex.on('error', (err) => {
+      if (err.message && err.message.includes('WebSocket is not open')) return;
+      cleanup();
+    });
     duplex.on('close', cleanup);
   } catch (err) {
     ws.close();
@@ -1210,13 +1232,25 @@ function hTr(ws, msg) {
     }
 
     const duplex = createWebSocketStream(ws);
-    activeConns++;
+    duplex.on('error', (err) => {
+      if (err.message && err.message.includes('WebSocket is not open')) return;
+      console.error('[trojan-tcp] Duplex error:', err.message);
+    });
 
-    const cleanup = () => { activeConns = Math.max(0, activeConns - 1); };
+    activeConns++;
+    let socket = null;
+
+    const cleanup = () => {
+      activeConns = Math.max(0, activeConns - 1);
+      if (socket) {
+        try { socket.destroy(); } catch (e) {}
+      }
+    };
     ws.on('close', cleanup);
+    ws.on('error', () => { ws.close(); });
 
     const connectAndPipe = (targetHost) => {
-      net.connect({ host: targetHost, port }, function () {
+      socket = net.connect({ host: targetHost, port }, function () {
         this.setNoDelay(true);
         this.setKeepAlive(true, 15000);
         this.setTimeout(300000, () => { this.destroy(); ws.close(); });
@@ -1225,7 +1259,14 @@ function hTr(ws, msg) {
         }
         duplex.pipe(this);
         this.pipe(duplex);
-      }).on('error', () => { ws.close(); });
+      });
+
+      socket.on('error', (err) => {
+        ws.close();
+      });
+      socket.on('close', () => {
+        ws.close();
+      });
     };
 
     resolveHost(host)
