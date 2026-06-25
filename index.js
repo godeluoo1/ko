@@ -194,9 +194,9 @@ function rnd(n = 8) {
 // ==================== 初始化 ====================
 fs.mkdirSync(RUN_DIR, { recursive: true });
 
-// 启动时清理历史残留
+// 启动时清理历史残留，但保留当前的随机名进程文件与预下载的官方 cf-bin 二进制包
 try { fs.readdirSync(RUN_DIR).forEach(f => {
-  if (f === botName) return;
+  if (f === botName || f === 'cf-bin') return;
   try { fs.unlinkSync(path.join(RUN_DIR, f)); } catch (e) {}
 }); } catch (e) {}
 
