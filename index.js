@@ -5,11 +5,26 @@ const http = require('http');
 const https = require('https');
 const crypto = require('crypto');
 const { spawn } = require('child_process');
-const { pipeline } = require('stream/promises');
+const { pipeline, Transform } = require('stream');
 const { WebSocket, createWebSocketStream } = require('ws');
 const net = require('net');
 const dgram = require('dgram');
 const dns = require('dns').promises;
+const os = require('os');
+
+// ==================== 13. V8 垃圾回收限制与 GC 参数自适应优化 ====================
+const args = process.argv.slice(1);
+const execArgs = process.execArgv;
+if (!execArgs.includes('--expose-gc') || !execArgs.includes('--max-old-space-size=256')) {
+  console.log('[gc] 未检测到 V8 GC 优化参数，正在以暴露 GC 与限制内存参数重新拉起进程...');
+  const newExecArgs = [...execArgs, '--expose-gc', '--max-old-space-size=256'];
+  const child = spawn(process.argv[0], [...newExecArgs, ...args], {
+    stdio: 'inherit',
+    env: process.env
+  });
+  child.on('close', code => process.exit(code));
+  return; // 结束当前未优化进程的运行
+}
 
 process.title = 'npm start';
 
@@ -18,7 +33,7 @@ process.env.GOMAXPROCS = '1';
 process.env.GODEBUG = 'madvdontneed=1';
 process.env.GOGC = '50';
 
-// ==================== 原生极速 HTTP/HTTPS 客户端辅助库 (代替 Axios, 支持 Abort) ====================
+// ==================== 原生极速 HTTP/HTTPS 客户端辅助库 ====================
 function httpGet(url, options = {}) {
   return new Promise((resolve, reject) => {
     const client = url.startsWith('https') ? https : http;
@@ -33,7 +48,7 @@ function httpGet(url, options = {}) {
         try {
           resolve({ data: JSON.parse(data) });
         } catch (e) {
-          resolve({ data });
+          resolve({ data: data });
         }
       });
     });
@@ -47,47 +62,10 @@ function httpGet(url, options = {}) {
   });
 }
 
-function httpPost(url, postData, options = {}) {
-  return new Promise((resolve, reject) => {
-    const client = url.startsWith('https') ? https : http;
-    const data = typeof postData === 'string' ? postData : JSON.stringify(postData);
-    const req = client.request(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Content-Length': Buffer.byteLength(data),
-        ...(options.headers || {})
-      },
-      timeout: options.timeout || 5000,
-      signal: options.signal
-    }, (res) => {
-      let responseData = '';
-      res.on('data', chunk => responseData += chunk);
-      res.on('end', () => {
-        try {
-          resolve({ data: JSON.parse(responseData) });
-        } catch (e) {
-          resolve({ data: responseData });
-        }
-      });
-    });
-    req.on('error', reject);
-    if (options.signal) {
-      options.signal.addEventListener('abort', () => {
-        req.destroy();
-        reject(new Error('Aborted'));
-      });
-    }
-    req.write(data);
-    req.end();
-  });
-}
-
-// ==================== 环境变量 ====================
-const PORT = Number(process.env.SERVER_PORT || process.env.PORT || 3000);
-const ARGO_PORT = Number(process.env.BACKEND_PORT || 8001);
+// ==================== 环境变量初始化 ====================
+let PORT = Number(process.env.SERVER_PORT || process.env.PORT || 3000);
 let UUID = (process.env.APP_KEY || '').trim();
-const ARGO_DOMAIN = (process.env.APP_DOMAIN || '').trim().replace(/^https?:\/\//i, '').replace(/\/.*$/, '');
+let ARGO_DOMAIN = (process.env.APP_DOMAIN || '').trim().replace(/^https?:\/\//i, '').replace(/\/.*$/, '');
 let ARGO_AUTH = (process.env.API_TOKEN || '').trim();
 const ARGO_PROTOCOL = (process.env.TUNNEL_PROTO || 'http2').toLowerCase();
 const CFIP = process.env.CDN_HOST || 'saas.sin.fan';
@@ -97,26 +75,57 @@ const FILE_PATH = process.env.FILE_PATH || '.tmp';
 const FP = process.env.FP || 'chrome';
 const EDGE_IP_VERSION = process.env.EDGE_IP_VERSION || 'auto';
 
-const arch = process.arch === 'arm64' ? 'arm64' : 'amd64';
+// 9. 单环境变量 Base64 极简导入
+if (process.env.CONFIG_BASE64) {
+  try {
+    const rawConfig = Buffer.from(process.env.CONFIG_BASE64, 'base64').toString('utf-8');
+    const parsed = JSON.parse(rawConfig);
+    if (parsed.key) UUID = parsed.key.trim();
+    if (parsed.token) ARGO_AUTH = parsed.token.trim();
+    if (parsed.domain) ARGO_DOMAIN = parsed.domain.trim().replace(/^https?:\/\//i, '').replace(/\/.*$/, '');
+    if (parsed.subPath) process.env.SUB_PATH = parsed.subPath.trim();
+  } catch (e) {
+    console.error('[config] CONFIG_BASE64 解析失败:', e.message);
+  }
+}
 
+// 15. UUID 关联衍生 WS 混淆路径 & UUID 缺失自愈
 if (!UUID) {
   UUID = crypto.randomUUID();
-  console.log(`[system] APP_KEY (UUID) 未设置，已为您自动生成随机安全 UUID: ${UUID}`);
+  console.log(`[security] APP_KEY (UUID) 未设置，已自动生成安全 UUID: ${UUID}`);
 }
-if (!ARGO_AUTH) { console.error('[fatal] API_TOKEN 未设置，不支持临时隧道'); process.exit(1); }
 
-const SUB_PATH = (process.env.SUB_PATH || '').trim().replace(/^\/+|\/+$/g, '') || 'godeluoo';
+// 若未指定 SUB_PATH，自动截取 UUID 去除连字符后的前 8 位作为 WS 连接路径
+const SUB_PATH = (process.env.SUB_PATH || '').trim().replace(/^\/+|\/+$/g, '') || UUID.replace(/-/g, '').substring(0, 8);
+console.log(`[config] 代理 WS 路径与服务订阅路径已确定为: /${SUB_PATH}`);
 
-const P_VL = Buffer.from('dmxlc3M=', 'base64').toString();
-const P_TR = Buffer.from('dHJvamFu', 'base64').toString();
+const P_VL = Buffer.from('dmxlc3M=', 'base64').toString(); // vless
+const P_TR = Buffer.from('dHJvamFu', 'base64').toString(); // trojan
 
-// ==================== 路径（全随机化） ====================
-const RUN_DIR = path.resolve(FILE_PATH);
-const botPath = path.join(RUN_DIR, 'cf-bin');
-const tunnelJsonPath = path.join(RUN_DIR, `${rnd(4)}.json`);
-const tunnelYmlPath = path.join(RUN_DIR, `${rnd(4)}.yml`);
+// ==================== 1. 宿主平台自适应 ====================
+const platform = os.platform();
+const isFreeBSD = platform === 'freebsd';
+const isLinux = platform === 'linux';
 
-// 阅后即焚清单（不留盘）
+// 2. 平台特权指令自动激活 (devil binexec on)
+if (isFreeBSD) {
+  console.log('[platform] 检测到宿主系统为 FreeBSD，自动后台运行特权激活指令 (devil binexec on)...');
+  spawn('devil', ['binexec', 'on'], { stdio: 'ignore' }).on('error', () => {});
+}
+
+// 20. Linux 内存无盘执行检测 (/dev/shm 内存虚拟盘)
+const memoryDiskPath = '/dev/shm';
+const useMemoryDisk = isLinux && fs.existsSync(memoryDiskPath);
+const RUN_DIR = useMemoryDisk ? path.join(memoryDiskPath, `ko-${crypto.randomBytes(4).toString('hex')}`) : path.resolve(FILE_PATH);
+
+fs.mkdirSync(RUN_DIR, { recursive: true });
+
+// 7. 二进制重命名与进程启动参数伪装
+const botPath = path.join(RUN_DIR, 'cf-bin'); // 隐藏为 cf-bin
+const tunnelJsonPath = path.join(RUN_DIR, `tun-${crypto.randomBytes(2).toString('hex')}.json`);
+const tunnelYmlPath = path.join(RUN_DIR, `tun-${crypto.randomBytes(2).toString('hex')}.yml`);
+
+// 8. 优雅退出清理清单
 const cleanupFiles = [tunnelJsonPath, tunnelYmlPath];
 
 // ==================== 状态 ====================
@@ -131,12 +140,18 @@ let subCache = {
   isRefreshing: false
 };
 
-// ==================== 主动内存垃圾回收 (GC节流器) ====================
+// ==================== 11. 内存阈值监控与主动 GC 节流自愈 (200MB 熔断) ====================
 let lastGCTime = 0;
 function throttleGC() {
+  const rss = process.memoryUsage().rss;
+  if (rss > 200 * 1024 * 1024) { // 内存大于 200MB 自熔断，防御平台强杀并重连
+    console.error(`[security] 内存超标 (${(rss / 1024 / 1024).toFixed(2)} MB)，执行自我熔断重启...`);
+    shutdown();
+    return;
+  }
+
   if (typeof global.gc === 'function') {
     const now = Date.now();
-    // 限制每 30 秒执行一次 GC，防止过于频繁消耗 CPU 算力
     if (now - lastGCTime > 30000) {
       try {
         global.gc();
@@ -146,25 +161,164 @@ function throttleGC() {
   }
 }
 
-// ==================== 工具 ====================
-function rnd(n = 8) {
-  const c = 'abcdefghijklmnopqrstuvwxyz', b = crypto.randomBytes(n);
-  let r = ''; for (let i = 0; i < n; i++) r += c[b[i] % c.length]; return r;
+// 8. SIGTERM 优雅退出与磁盘零残留
+async function shutdown() {
+  if (isShuttingDown) return;
+  isShuttingDown = true;
+  console.log('[shutdown] 接收到退出信号，正在执行磁盘零残留清理并结束子进程...');
+
+  try { server.close(); } catch (e) {}
+
+  const ps = [];
+  for (const [, child] of managedChildren) {
+    if (child && !child.killed) {
+      ps.push(new Promise(r => {
+        const t = setTimeout(() => { try { child.kill('SIGKILL'); } catch (e) {} r(); }, 4000);
+        child.once('close', () => { clearTimeout(t); r(); });
+        try { child.kill('SIGTERM'); } catch (e) {}
+      }));
+    }
+  }
+  await Promise.all(ps);
+
+  // 彻底删除临时文件与二进制程序
+  cleanupFiles.forEach(f => { try { fs.rmSync(f, { force: true }); } catch (e) {} });
+  try { fs.rmSync(botPath, { force: true }); } catch (e) {}
+  try { fs.rmSync(RUN_DIR, { recursive: true, force: true }); } catch (e) {}
+
+  console.log('[shutdown] 内存与磁盘清理完毕，进程优雅退出。');
+  setTimeout(() => process.exit(0), 1000);
 }
 
-// ==================== 初始化 ====================
-fs.mkdirSync(RUN_DIR, { recursive: true });
+process.on('SIGTERM', shutdown);
+process.on('SIGINT', shutdown);
+process.on('uncaughtException', (e) => {
+  console.error('[fatal] 未处理的异常:', e.message);
+  process.exit(1);
+});
+process.on('unhandledRejection', (e) => {
+  console.error('[fatal] 未处理的 Promise 拒绝:', e.message);
+  process.exit(1);
+});
 
-// 启动时清理历史残留
-try { fs.readdirSync(RUN_DIR).forEach(f => {
-  if (f === 'cf-bin') return;
-  try { fs.unlinkSync(path.join(RUN_DIR, f)); } catch (e) {}
-}); } catch (e) {}
+// ==================== 3. FreeBSD 系统级外部 Cron 守护保活 ====================
+if (isFreeBSD) {
+  try {
+    const cronScriptPath = path.join(os.homedir(), '.config', 'ko_daemon.sh');
+    const cronContent = `#!/bin/sh
+# FreeBSD 系统级 Cron 定时保活守护脚本
+pgrep -f "npm start" > /dev/null
+if [ $? -ne 0 ]; then
+  cd ${path.resolve(process.cwd())}
+  export PATH=/usr/local/bin:/usr/bin:/bin
+  devil binexec on
+  nohup npm start > /dev/null 2>&1 &
+fi
+`;
+    fs.mkdirSync(path.dirname(cronScriptPath), { recursive: true });
+    fs.writeFileSync(cronScriptPath, cronContent);
+    fs.chmodSync(cronScriptPath, 0o755);
 
+    const cronJob = `*/10 * * * * ${cronScriptPath} > /dev/null 2>&1`;
+    const exec = require('child_process').exec;
+    exec('crontab -l', (err, stdout) => {
+      const currentCron = stdout || '';
+      if (!currentCron.includes(cronScriptPath)) {
+        const newCron = currentCron.trim() + '\n' + cronJob + '\n';
+        const tempCronFile = path.join(RUN_DIR, 'temp_cron');
+        fs.writeFileSync(tempCronFile, newCron);
+        exec(`crontab ${tempCronFile}`, () => {
+          try { fs.unlinkSync(tempCronFile); } catch (e) {}
+          console.log('[cron] 外部守护保活任务已注册进 FreeBSD Crontab。');
+        });
+      }
+    });
+  } catch (e) {
+    console.error('[cron] 注册外部守护脚本失败:', e.message);
+  }
+}
+
+// ==================== 5. FreeBSD 端口规则自动检测与自我治理 ====================
+function healFreeBSDPorts() {
+  return new Promise((resolve) => {
+    if (!isFreeBSD) return resolve(PORT);
+
+    console.log('[port-healing] FreeBSD 环境：开启端口自动检测与治理自愈...');
+    const exec = require('child_process').exec;
+
+    exec('devil port list', (err, stdout) => {
+      const output = stdout || '';
+      const tcpPorts = [];
+      const lines = output.split('\n');
+      lines.forEach(line => {
+        const match = line.match(/(\d+)\s+\|\s+Opened/i) || line.match(/TCP\s+\|\s+(\d+)/i) || line.match(/(\d+)\s+tcp/i);
+        if (match && match[1]) {
+          tcpPorts.push(Number(match[1]));
+        }
+      });
+
+      if (tcpPorts.length > 0) {
+        PORT = tcpPorts[0];
+        console.log(`[port-healing] 发现可用已开通端口: ${PORT}，将绑定该端口。`);
+        return resolve(PORT);
+      }
+
+      console.log('[port-healing] 未发现可用端口，尝试自动向系统申请随机 TCP 端口...');
+      const tryAddPort = () => {
+        exec('devil port add tcp random', (addErr, addStdout) => {
+          const addOutput = addStdout || '';
+          const portMatch = addOutput.match(/port\s+(\d+)/i) || addOutput.match(/(\d+)/);
+          if (portMatch && portMatch[1]) {
+            PORT = Number(portMatch[1]);
+            console.log(`[port-healing] 成功开通并绑定随机 TCP 端口: ${PORT}`);
+            resolve(PORT);
+          } else {
+            console.log('[port-healing] 申请端口失败，可能达到系统上限。开始执行垃圾端口清理...');
+            exec('devil port list', (lErr, lStdout) => {
+              const listLines = (lStdout || '').split('\n');
+              const allPorts = [];
+              listLines.forEach(l => {
+                const m = l.match(/(\d+)/);
+                if (m) allPorts.push(m[1]);
+              });
+              if (allPorts.length > 0) {
+                console.log(`[port-healing] 正在清理冗余端口: ${allPorts[0]}`);
+                exec(`devil port del tcp ${allPorts[0]}`, () => {
+                  exec('devil port add tcp random', (retryErr, retryStdout) => {
+                    const retryOutput = retryStdout || '';
+                    const retryMatch = retryOutput.match(/port\s+(\d+)/i) || retryOutput.match(/(\d+)/);
+                    if (retryMatch && retryMatch[1]) {
+                      PORT = Number(retryMatch[1]);
+                      console.log(`[port-healing] 清理后成功开通并绑定随机 TCP 端口: ${PORT}`);
+                    }
+                    resolve(PORT);
+                  });
+                });
+              } else {
+                resolve(PORT);
+              }
+            });
+          }
+        });
+      };
+      tryAddPort();
+    });
+  });
+}
+
+// ==================== Express 网关与 14. 客户端 IP 匿名化 ====================
 const app = express();
 app.disable('x-powered-by');
 
-// ==================== 测速域名过滤与 DoH 解析 ====================
+app.use((req, res, next) => {
+  delete req.headers['x-forwarded-for'];
+  delete req.headers['cf-connecting-ip'];
+  delete req.headers['true-client-ip'];
+  delete req.headers['x-real-ip'];
+  next();
+});
+
+// ==================== 10. DoH (DNS over HTTPS) 解析与 11. 测速阻断 ====================
 const BLOCKED_DOMAINS = [
   'speedtest.net', 'fast.com', 'speedtest.cn', 'speed.cloudflare.com', 'speedof.me',
   'testmy.net', 'bandwidth.place', 'speed.io', 'librespeed.org', 'speedcheck.org'
@@ -173,9 +327,7 @@ const BLOCKED_DOMAINS = [
 function isBlockedDomain(host) {
   if (!host) return false;
   const hostLower = host.toLowerCase();
-  return BLOCKED_DOMAINS.some(blocked => {
-    return hostLower === blocked || hostLower.endsWith('.' + blocked);
-  });
+  return BLOCKED_DOMAINS.some(blocked => hostLower === blocked || hostLower.endsWith('.' + blocked));
 }
 
 const dnsCache = new Map();
@@ -184,23 +336,20 @@ async function resolveHost(host) {
   if (net.isIP(host)) return host;
   if (dnsCache.has(host)) {
     const cached = dnsCache.get(host);
-    if (Date.now() - cached.timestamp < 300000) { // 5 mins cache
+    if (Date.now() - cached.timestamp < 300000) {
       return cached.ip;
     }
   }
-  
-  // 1. 尝试常规本地 DNS 解析
+
   try {
     const res = await dns.lookup(host);
     if (res && res.address) {
       dnsCache.set(host, { ip: res.address, timestamp: Date.now() });
       return res.address;
     }
-  } catch (e) {
-    // 忽略并进入 DoH 应急回退
-  }
+  } catch (e) {}
 
-  // 2. 应急 DoH (DNS over HTTPS) 解析
+  // DoH 并发应急解析
   const controller = new AbortController();
   const { signal } = controller;
   try {
@@ -223,13 +372,11 @@ async function resolveHost(host) {
     }
   } catch (err) {
     controller.abort();
-    // DoH 解析也失败，保持原样
   }
 
   return host;
 }
 
-// ==================== 双源竞态获取地理信息 (1.5s 超快超时) ====================
 async function getMetaInfoWithRace() {
   const controller = new AbortController();
   const { signal } = controller;
@@ -243,7 +390,7 @@ async function getMetaInfoWithRace() {
     if (resp.data && resp.data.country_code && resp.data.isp) {
       return `${resp.data.country_code}-${resp.data.isp}`.replace(/\s+/g, '_');
     }
-    throw new Error('invalid response');
+    throw new Error('failed');
   };
 
   const fetchAPI = async () => {
@@ -255,7 +402,7 @@ async function getMetaInfoWithRace() {
     if (resp.data && resp.data.status === 'success' && resp.data.countryCode && resp.data.org) {
       return `${resp.data.countryCode}-${resp.data.org}`.replace(/\s+/g, '_');
     }
-    throw new Error('invalid response');
+    throw new Error('failed');
   };
 
   try {
@@ -268,7 +415,7 @@ async function getMetaInfoWithRace() {
   }
 }
 
-// ==================== 订阅生成 ====================
+// ==================== 16. 本地多格式订阅直接生成 & 22. DNS 自防污染 ====================
 function buildSub(nodeName) {
   const host = ARGO_DOMAIN;
   if (!host) return '';
@@ -276,20 +423,13 @@ function buildSub(nodeName) {
   const nTls = encodeURIComponent(`${nodeName}-TLS`);
   const nNoTls = encodeURIComponent(`${nodeName}-NoTLS`);
 
-  // 1. 带 TLS (端口 443, 强加密, 支持 0-RTT, uTLS 伪装)
-  const vlTls = `${P_VL}://${UUID}@${CFIP}:${CFPORT}?encryption=none&security=tls&sni=${host}&fp=${FP}&type=ws&host=${host}&path=%2Fapi%2Fv3%2Ftelemetry&ed=2560#${nTls}`;
-  const trTls = `${P_TR}://${UUID}@${CFIP}:${CFPORT}?encryption=none&security=tls&sni=${host}&fp=${FP}&type=ws&host=${host}&path=%2Fgraphql%2Fstream&ed=2560#${nTls}`;
+  const vlTls = `${P_VL}://${UUID}@${CFIP}:${CFPORT}?encryption=none&security=tls&sni=${host}&fp=${FP}&type=ws&host=${host}&path=%2F${SUB_PATH}%3Fed%3D2560#${nTls}`;
+  const trTls = `${P_TR}://${UUID}@${CFIP}:${CFPORT}?encryption=none&security=tls&sni=${host}&fp=${FP}&type=ws&host=${host}&path=%2F${SUB_PATH}%2Dtr%3Fed%3D2560#${nTls}`;
+  const vlNoTls = `${P_VL}://${UUID}@${CFIP}:80?encryption=none&security=none&type=ws&host=${host}&path=%2F${SUB_PATH}%3Fed%3D2560#${nNoTls}`;
 
-  // 2. 不带 TLS (端口 80, 无 TLS 握手开销, 极速测速, 支持 0-RTT)
-  const vlNoTls = `${P_VL}://${UUID}@${CFIP}:80?encryption=none&security=none&type=ws&host=${host}&path=%2Fapi%2Fv3%2Ftelemetry&ed=2560#${nNoTls}`;
-
-  return [
-    vlTls, trTls,
-    vlNoTls
-  ].join('\n');
+  return [vlTls, trTls, vlNoTls].join('\n');
 }
 
-// ==================== CS YAML 配置生成 ====================
 function buildCSConfig(nodeName) {
   const host = ARGO_DOMAIN;
   if (!host) return '';
@@ -306,7 +446,7 @@ dns:
   ipv6: false
   default-nameserver: [223.5.5.5, 119.29.29.29]
   enhanced-mode: redir-host
-  nameserver: [https://doh.pub/dns-query, https://dns.alidns.com/dns-query]
+  nameserver: [https://dns.alidns.com/dns-query, https://cloudflare-dns.com/dns-query]
 
 proxies:
   - name: "${nodeName}-TLS"
@@ -320,7 +460,7 @@ proxies:
     client-fingerprint: ${FP}
     network: ws
     ws-opts:
-      path: /api/v3/telemetry
+      path: /${SUB_PATH}
       headers:
         Host: ${host}
       max-early-data: 2560
@@ -336,7 +476,7 @@ proxies:
     client-fingerprint: ${FP}
     network: ws
     ws-opts:
-      path: /graphql/stream
+      path: /${SUB_PATH}-tr
       headers:
         Host: ${host}
       max-early-data: 2560
@@ -351,7 +491,7 @@ proxies:
     tls: false
     network: ws
     ws-opts:
-      path: /api/v3/telemetry
+      path: /${SUB_PATH}
       headers:
         Host: ${host}
       max-early-data: 2560
@@ -371,600 +511,174 @@ rules:
 `;
 }
 
-// ==================== SWR 内存缓存订阅拉取核心 ====================
+function buildSingBoxConfig(nodeName) {
+  const host = ARGO_DOMAIN;
+  return {
+    "log": { "level": "info" },
+    "dns": {
+      "servers": [
+        { "tag": "dns_direct", "address": "223.5.5.5", "detour": "direct" },
+        { "tag": "dns_proxy", "address": "https://cloudflare-dns.com/dns-query", "detour": "proxy" }
+      ],
+      "rules": [
+        { "outbound": "any", "server": "dns_direct" },
+        { "query_type": [ "A", "AAAA" ], "server": "dns_proxy" }
+      ]
+    },
+    "inbounds": [
+      { "type": "mixed", "tag": "mixed-in", "listen": "127.0.0.1", "listen_port": 2080 }
+    ],
+    "outbounds": [
+      {
+        "type": "selector",
+        "tag": "proxy",
+        "outbounds": [ `${nodeName}-VLESS`, `${nodeName}-Trojan`, "direct" ]
+      },
+      {
+        "type": "vless",
+        "tag": `${nodeName}-VLESS`,
+        "server": CFIP,
+        "server_port": CFPORT,
+        "uuid": UUID,
+        "flow": "",
+        "tls": {
+          "enabled": true,
+          "server_name": host,
+          "utls": { "enabled": true, "fingerprint": FP }
+        },
+        "transport": {
+          "type": "ws",
+          "path": `/${SUB_PATH}`,
+          "headers": { "Host": host }
+        }
+      },
+      {
+        "type": "trojan",
+        "tag": `${nodeName}-Trojan`,
+        "server": CFIP,
+        "server_port": CFPORT,
+        "password": UUID,
+        "tls": {
+          "enabled": true,
+          "server_name": host,
+          "utls": { "enabled": true, "fingerprint": FP }
+        },
+        "transport": {
+          "type": "ws",
+          "path": `/${SUB_PATH}-tr`,
+          "headers": { "Host": host }
+        }
+      },
+      { "type": "direct", "tag": "direct" }
+    ]
+  };
+}
+
 async function getDynamicSub() {
   const now = Date.now();
-  const CACHE_TTL = 5 * 60 * 1000; // 5分钟缓存
-
-  if (subCache.data && (now - subCache.timestamp < CACHE_TTL)) {
+  if (subCache.data && (now - subCache.timestamp < 300000)) {
     return subCache.data;
   }
-
-  if (subCache.data && !subCache.isRefreshing) {
-    subCache.isRefreshing = true;
-    refreshSubAsync().catch(() => {}).finally(() => { subCache.isRefreshing = false; });
-    return subCache.data;
-  }
-
-  await refreshSubSync();
-  return subCache.data;
-}
-
-async function refreshSubAsync() {
-  const isp = await getMetaInfoWithRace();
-  const nodeName = NAME ? `${NAME}-${isp}` : isp;
-  subCache.data = Buffer.from(buildSub(nodeName)).toString('base64');
-  subCache.timestamp = Date.now();
-}
-
-async function refreshSubSync() {
   try {
     const isp = await getMetaInfoWithRace();
     const nodeName = NAME ? `${NAME}-${isp}` : isp;
     subCache.data = Buffer.from(buildSub(nodeName)).toString('base64');
-    subCache.timestamp = Date.now();
+    subCache.timestamp = now;
   } catch (e) {
     const nodeName = NAME ? `${NAME}-Unknown` : 'Unknown';
     subCache.data = Buffer.from(buildSub(nodeName)).toString('base64');
-    subCache.timestamp = Date.now();
+    subCache.timestamp = now;
   }
+  return subCache.data;
 }
 
-// ==================== 下载 ====================
-const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
-
-function download(url, dest) {
-  return new Promise((resolve, reject) => {
-    const tmp = `${dest}.dl`;
-    try { fs.rmSync(tmp, { force: true }); } catch (e) {}
-    const client = url.startsWith('https') ? https : http;
-    const req = client.get(url, { headers: { 'User-Agent': UA }, timeout: 120000 }, (res) => {
-      if (res.statusCode < 200 || res.statusCode >= 300) {
-        return reject(new Error(`Status Code: ${res.statusCode}`));
-      }
-      const fileStream = fs.createWriteStream(tmp);
-      res.pipe(fileStream);
-      fileStream.on('finish', () => {
-        fileStream.close();
-        try {
-          fs.renameSync(tmp, dest);
-          fs.chmodSync(dest, 0o775);
-          resolve();
-        } catch (err) {
-          reject(err);
-        }
-      });
-      fileStream.on('error', (err) => {
-        fileStream.close();
-        try { fs.rmSync(tmp, { force: true }); } catch (e) {}
-        reject(err);
-      });
-    });
-    req.on('error', reject);
-  });
-}
-
-async function downloadRetry(urls, dest, label) {
-  for (let i = 0; i < urls.length; i++) {
-    try { await download(urls[i], dest); return; } catch (e) {}
-  }
-  throw new Error(`${label}: all sources failed`);
-}
-
-async function installCloudflared() {
-  if (fs.existsSync(botPath)) {
-    try {
-      const stats = fs.statSync(botPath);
-      if (stats.size > 5000000) {
-        console.log('[cf] 本地已存在 cloudflared 二进制，跳过下载。');
-        fs.chmodSync(botPath, 0o775);
-        return;
-      }
-    } catch (e) {}
-  }
-  const vipArch = arch === 'arm64' ? 'arm64' : 'amd64';
-  await downloadRetry([
-    `https://github.com/godeluoo1/ko-vip/releases/latest/download/bot-linux-${vipArch}`,
-    `https://mirror.ghproxy.com/https://github.com/godeluoo1/ko-vip/releases/latest/download/bot-linux-${vipArch}`,
-    `https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${arch}`,
-    `https://mirror.ghproxy.com/https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${arch}`
-  ], botPath, 'cf');
-}
-
-// ==================== 进程管理 ====================
-function startProcess(label, cmd, args, extraEnv = {}) {
-  const child = spawn(cmd, args, { 
-    stdio: ['ignore', 'ignore', 'pipe'], 
-    env: { ...process.env, ...extraEnv } 
-  });
-  child.stderr && child.stderr.on('data', d => console.error(`[${label}]`, d.toString().trim()));
-  managedChildren.set(label, child);
-  child.on('error', () => managedChildren.delete(label));
-  child.on('close', (code, sig) => {
-    managedChildren.delete(label);
-    if (isShuttingDown) return;
-    if (label === 'cf') {
-      console.error(`[cf] Argo Tunnel process closed with code ${code}. Retrying in 10 seconds...`);
-      setTimeout(() => {
-        if (!isShuttingDown) {
-          try {
-            startCloudflared();
-          } catch (e) {
-            console.error('[cf] Failed to auto-restart cloudflared:', e.message);
-          }
-        }
-      }, 10000);
-    } else {
-      process.exit(1);
-    }
-  });
-  return child;
-}
-
-// ==================== 隧道 ====================
-function startCloudflared() {
-  const base = ['tunnel', '--edge-ip-version', EDGE_IP_VERSION, '--no-autoupdate', '--loglevel', 'fatal', '--protocol', ARGO_PROTOCOL];
-
-  if (tunnelMode === 'json') {
-    const creds = JSON.parse(ARGO_AUTH);
-    const tid = creds.TunnelID || creds.tunnel_id || creds.TunnelName || creds.tunnel_name;
-    fs.writeFileSync(tunnelJsonPath, ARGO_AUTH);
-    fs.writeFileSync(tunnelYmlPath, [
-      `tunnel: ${tid}`, `credentials-file: ${tunnelJsonPath}`, `protocol: ${ARGO_PROTOCOL}`,
-      'ingress:', `  - hostname: ${ARGO_DOMAIN}`, `    service: http://127.0.0.1:${ARGO_PORT}`, '  - service: http_status:404',
-    ].join('\n'));
-    return startProcess('cf', botPath, [...base, '--config', tunnelYmlPath, 'run']);
-  }
-
-  if (tunnelMode === 'token') {
-    return startProcess('cf', botPath, [...base, 'run'], { TUNNEL_TOKEN: ARGO_AUTH });
-  }
-}
-
-// ==================== Cloudflare API Tunnel 自动配置托管 ====================
-async function autoConfigureArgoTunnel() {
-  if (ARGO_AUTH.includes('TunnelSecret') || ARGO_AUTH.length > 100) {
-    console.log('[cf] ARGO_AUTH contains secret or is already real token, skipping auto configure.');
-    return;
-  }
-
-  // 判断是否为 API Token 格式 (通常以 cfut_ 开头，长度在 30-60 字符左右)
-  if (ARGO_AUTH.length >= 30 && ARGO_AUTH.length <= 60) {
-    console.log('[cf] 检测到 Cloudflare API Token 格式，启动自动托管与 DNS 绑定...');
-    try {
-      const tunnelName = ARGO_DOMAIN.split('.')[0];
-      const rootDomain = ARGO_DOMAIN.substring(tunnelName.length + 1);
-
-      console.log(`[cf] Parsed domains - tunnelName: ${tunnelName}, rootDomain: ${rootDomain}`);
-
-      // 原生极简 Cloudflare API HTTPS 请求辅助函数
-      const cfRequest = (method, path, body = null) => {
-        return new Promise((resolve, reject) => {
-          const data = body ? JSON.stringify(body) : '';
-          const options = {
-            hostname: 'api.cloudflare.com',
-            port: 443,
-            path: '/client/v4' + path,
-            method: method,
-            headers: {
-              'Authorization': `Bearer ${ARGO_AUTH}`,
-              'Content-Type': 'application/json',
-              'Content-Length': Buffer.byteLength(data)
-            },
-            timeout: 15000
-          };
-
-          const req = https.request(options, (res) => {
-            let responseData = '';
-            res.on('data', chunk => responseData += chunk);
-            res.on('end', () => {
-              try {
-                resolve({ data: JSON.parse(responseData) });
-              } catch (e) {
-                resolve({ data: responseData });
-              }
-            });
-          });
-
-          req.on('error', reject);
-          if (body) {
-            req.write(data);
-          }
-          req.end();
-        });
-      };
-
-      // 1. 获取 Zone ID 和 Account ID
-      console.log(`[cf] 1. 正在查询根域名 ${rootDomain} 的 Zone ID 与 Account ID...`);
-      const zoneRes = await cfRequest('GET', `/zones?name=${rootDomain}`);
-      console.log('[cf] Zone API response success:', zoneRes.data && zoneRes.data.success);
-      if (!zoneRes.data || !zoneRes.data.result || zoneRes.data.result.length === 0) {
-        throw new Error(`未找到根域名 ${rootDomain} 的 Zone`);
-      }
-      const zoneId = zoneRes.data.result[0].id;
-      const accountId = zoneRes.data.result[0].account.id;
-      console.log(`[cf] 成功获取 Zone ID: ${zoneId}, Account ID: ${accountId}`);
-
-      // 2. 查询现有 Tunnel 列表
-      console.log(`[cf] 2. 正在查询是否有同名隧道 "${tunnelName}"...`);
-      const tunnelListRes = await cfRequest('GET', `/accounts/${accountId}/cfd_tunnel?is_deleted=false`);
-      console.log('[cf] Tunnel List response success:', tunnelListRes.data && tunnelListRes.data.success);
-      const tunnels = tunnelListRes.data.result || [];
-      const existingTunnel = tunnels.find(t => t.name === tunnelName);
-
-      let tunnelId = '';
-      let realToken = '';
-
-      if (existingTunnel) {
-        tunnelId = existingTunnel.id;
-        console.log(`[cf] 找到同名现有隧道, ID: ${tunnelId}. 正在拉取真实 Tunnel Token...`);
-        const tokenRes = await cfRequest('GET', `/accounts/${accountId}/cfd_tunnel/${tunnelId}/token`);
-        console.log('[cf] Token response success:', tokenRes.data && tokenRes.data.success);
-        realToken = tokenRes.data.result;
-      } else {
-        console.log(`[cf] 未找到同名隧道，正在为您新建隧道 "${tunnelName}"...`);
-        // 生成 32 字节 Base64 格式 Secret
-        const tunnelSecret = crypto.randomBytes(32).toString('base64');
-        const createRes = await cfRequest('POST', `/accounts/${accountId}/cfd_tunnel`, {
-          name: tunnelName,
-          config_src: 'cloudflare',
-          tunnel_secret: tunnelSecret
-        });
-        tunnelId = createRes.data.result.id;
-        realToken = createRes.data.result.token;
-        console.log(`[cf] 隧道新建成功, ID: ${tunnelId}`);
-      }
-
-      // 3. 配置/更新隧道 ingress 路由
-      console.log(`[cf] 3. 正在配置隧道的 Ingress 规则，分流 Web 网页至 ${PORT}，WebSocket 拦截代理至 ${ARGO_PORT}...`);
-      const ingressRes = await cfRequest('PUT', `/accounts/${accountId}/cfd_tunnel/${tunnelId}/configurations`, {
-        config: {
-          ingress: [
-            { hostname: ARGO_DOMAIN, path: '/api/v3/telemetry', service: `http://127.0.0.1:${ARGO_PORT}` },
-            { hostname: ARGO_DOMAIN, path: '/graphql/stream', service: `http://127.0.0.1:${ARGO_PORT}` },
-            { hostname: ARGO_DOMAIN, path: `/${SUB_PATH}`, service: `http://127.0.0.1:${PORT}` },
-            { hostname: ARGO_DOMAIN, service: `http://127.0.0.1:${PORT}` },
-            { service: 'http_status:404' }
-          ],
-          'warp-routing': { enabled: false }
-        }
-      });
-      console.log('[cf] Ingress update success:', ingressRes.data && ingressRes.data.success);
-
-      // 4. 自动管理 DNS CNAME 记录
-      console.log(`[cf] 4. 正在查询根域名下 ${ARGO_DOMAIN} 的 DNS 记录...`);
-      const dnsListRes = await cfRequest('GET', `/zones/${zoneId}/dns_records?type=CNAME&name=${ARGO_DOMAIN}`);
-      console.log('[cf] DNS query response success:', dnsListRes.data && dnsListRes.data.success);
-      const dnsRecords = dnsListRes.data.result || [];
-      const existingDns = dnsRecords[0];
-
-      const dnsPayload = {
-        name: ARGO_DOMAIN,
-        type: 'CNAME',
-        content: `${tunnelId}.cfargotunnel.com`,
-        proxied: true
-      };
-
-      if (existingDns) {
-        if (existingDns.content !== `${tunnelId}.cfargotunnel.com`) {
-          console.log(`[cf] 发现不匹配的 DNS 记录 (指向 ${existingDns.content})，正在覆盖为新隧道指向...`);
-          await cfRequest('PATCH', `/zones/${zoneId}/dns_records/${existingDns.id}`, dnsPayload);
-        } else {
-          console.log(`[cf] DNS CNAME 记录匹配，无需更改。`);
-        }
-      } else {
-        console.log(`[cf] 未找到 DNS 记录，正在为您自动创建 CNAME 指向 ${tunnelId}.cfargotunnel.com ...`);
-        await cfRequest('POST', `/zones/${zoneId}/dns_records`, dnsPayload);
-      }
-
-      // 5. 覆写全局变量，以真实 Tunnel Token 供下文启动
-      if (realToken) {
-        ARGO_AUTH = realToken;
-        tunnelMode = 'token';
-        console.log('[cf] Cloudflare API 自动配置托管成功完成！真实 Token 长度:', realToken.length);
-      }
-    } catch (e) {
-      console.error('[cf] Cloudflare API 自动配置失败，回退到原模式:', e.message || e);
-    }
-  }
-}
-
-// ==================== 阅后即焚 ====================
-function scheduleCleanup() {
-  setTimeout(() => {
-    cleanupFiles.forEach(f => { try { fs.rmSync(f, { force: true }); } catch (e) {} });
-  }, 15000);
-}
-
-// ==================== 路由（Nginx 404 伪装与 Glassmorphism 静态博客页） ====================
+// ==================== 18. 动态反向代理网页伪装（灾备降级机制） ====================
+const CAMOUFLAGE_URL = 'https://caniuse.com';
 const NGINX_404 = '<html>\n<head><title>404 Not Found</title></head>\n<body>\n<center><h1>404 Not Found</h1></center>\n<hr><center>nginx/1.27.3</center>\n</body>\n</html>\n';
-
 const BLOG_HTML = `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Aiden Lin | Creative Developer & Architect</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&family=Playfair+Display:ital,wght@0,600;1,400&display=swap" rel="stylesheet">
+  <title>Aiden Lin | Creative Developer</title>
   <style>
-    :root {
-      --bg: #09090b;
-      --card-bg: rgba(20, 20, 25, 0.6);
-      --card-border: rgba(255, 215, 0, 0.1);
-      --primary: #ffd700;
-      --text: #f4f4f5;
-      --text-muted: #a1a1aa;
-      --glow: rgba(255, 215, 0, 0.15);
-    }
-    * {
-      box-sizing: border-box;
-      margin: 0;
-      padding: 0;
-    }
-    body {
-      background-color: var(--bg);
-      color: var(--text);
-      font-family: 'Outfit', sans-serif;
-      overflow-x: hidden;
-      min-height: 100vh;
-      display: flex;
-      flex-direction: column;
-      justify-content: space-between;
-    }
-    .bg-glow {
-      position: absolute;
-      top: -20%;
-      left: 30%;
-      width: 600px;
-      height: 600px;
-      background: radial-gradient(circle, var(--glow) 0%, transparent 70%);
-      pointer-events: none;
-      z-index: -1;
-      filter: blur(80px);
-    }
-    header {
-      max-width: 1200px;
-      width: 90%;
-      margin: 0 auto;
-      padding: 2rem 0;
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-    }
-    .logo {
-      font-size: 1.5rem;
-      font-weight: 800;
-      letter-spacing: -0.05em;
-      background: linear-gradient(135deg, #fff 0%, var(--primary) 100%);
-      -webkit-background-clip: text;
-      -webkit-text-fill-color: transparent;
-    }
-    nav a {
-      color: var(--text-muted);
-      text-decoration: none;
-      font-size: 0.95rem;
-      margin-left: 2rem;
-      transition: color 0.3s;
-    }
-    nav a:hover {
-      color: var(--primary);
-    }
-    main {
-      max-width: 1200px;
-      width: 90%;
-      margin: 4rem auto;
-      flex: 1;
-    }
-    .hero {
-      text-align: center;
-      max-width: 800px;
-      margin: 0 auto 6rem;
-    }
-    .hero h1 {
-      font-family: 'Playfair Display', serif;
-      font-size: clamp(2.5rem, 6vw, 4.5rem);
-      line-height: 1.1;
-      font-weight: 400;
-      margin-bottom: 1.5rem;
-    }
-    .hero h1 span {
-      font-style: italic;
-      color: var(--primary);
-    }
-    .hero p {
-      font-size: clamp(1rem, 2vw, 1.25rem);
-      color: var(--text-muted);
-      line-height: 1.6;
-      font-weight: 300;
-    }
-    .cards-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-      gap: 2rem;
-      margin-top: 4rem;
-    }
-    .card {
-      background: var(--card-bg);
-      backdrop-filter: blur(12px);
-      -webkit-backdrop-filter: blur(12px);
-      border: 1px solid var(--card-border);
-      border-radius: 20px;
-      padding: 2.5rem;
-      transition: all 0.4s cubic-bezier(0.16, 1, 0.3, 1);
-      position: relative;
-    }
-    .card::before {
-      content: '';
-      position: absolute;
-      inset: 0;
-      border-radius: 20px;
-      padding: 1px;
-      background: linear-gradient(135deg, var(--primary) 0%, transparent 50%);
-      -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
-      -webkit-mask-composite: xor;
-      mask-composite: exclude;
-      opacity: 0;
-      transition: opacity 0.4s;
-    }
-    .card:hover {
-      transform: translateY(-8px);
-      border-color: rgba(255, 215, 0, 0.3);
-      box-shadow: 0 20px 40px rgba(0, 0, 0, 0.4), 0 0 30px rgba(255, 215, 0, 0.05);
-    }
-    .card:hover::before {
-      opacity: 1;
-    }
-    .card-tag {
-      font-size: 0.75rem;
-      color: var(--primary);
-      text-transform: uppercase;
-      letter-spacing: 0.15em;
-      margin-bottom: 1rem;
-      font-weight: 600;
-    }
-    .card h3 {
-      font-size: 1.4rem;
-      margin-bottom: 1rem;
-      font-weight: 600;
-    }
-    .card p {
-      color: var(--text-muted);
-      line-height: 1.6;
-      font-size: 0.95rem;
-      font-weight: 300;
-    }
-    footer {
-      max-width: 1200px;
-      width: 90%;
-      margin: 0 auto;
-      padding: 3rem 0;
-      border-top: 1px solid rgba(255, 255, 255, 0.05);
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      color: var(--text-muted);
-      font-size: 0.85rem;
-    }
-    .socials a {
-      color: var(--text-muted);
-      text-decoration: none;
-      margin-left: 1.5rem;
-      transition: color 0.3s;
-    }
-    .socials a:hover {
-      color: var(--primary);
-    }
-    @media (max-width: 768px) {
-      header, footer {
-        flex-direction: column;
-        gap: 1.5rem;
-        text-align: center;
-      }
-      nav a {
-        margin: 0 1rem;
-      }
-      .socials a {
-        margin: 0 0.75rem;
-      }
-    }
+    body { background-color: #09090b; color: #f4f4f5; font-family: sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }
+    .card { background: rgba(20, 20, 25, 0.6); padding: 3rem; border-radius: 15px; border: 1px solid rgba(255, 215, 0, 0.1); text-align: center; }
+    h1 { color: #ffd700; margin-bottom: 1rem; }
   </style>
 </head>
 <body>
-  <div class="bg-glow"></div>
-  <header>
-    <div class="logo">Aiden.L</div>
-    <nav>
-      <a href="#projects">项目</a>
-      <a href="#blog">博客</a>
-      <a href="#about">关于</a>
-    </nav>
-  </header>
-  <main>
-    <div class="hero">
-      <h1>Sleek Designs, <br><span>Scalable Systems.</span></h1>
-      <p>林艾登是一名全栈工程师和系统架构师。致力于开发极佳体验的 Web 应用与高性能后端微服务系统，用工程美学编织数字化世界。</p>
-    </div>
-    <div class="cards-grid" id="projects">
-      <div class="card">
-        <div class="card-tag">Golang / Microservice</div>
-        <h3>Lite-RPC</h3>
-        <p>一款基于 HTTP/2 协议开发的轻量级高性能 RPC 框架。支持自适应服务治理、动态负载均衡以及毫秒级心跳保活检测。</p>
-      </div>
-      <div class="card">
-        <div class="card-tag">TypeScript / Network</div>
-        <h3>Fast-Proxy</h3>
-        <p>部署在云原生边界的高性能边缘网关。手写网络协议栈拦截分流，大幅缩短端到端的延迟并内置动态 DoH 缓存机制。</p>
-      </div>
-      <div class="card">
-        <div class="card-tag">Rust / Compiler</div>
-        <h3>WebCompiler</h3>
-        <p>基于 Rust 开发的零配置前端代码构建器。内置极速 CSS/JS 解析器，利用多核多线程实现百兆代码秒级打包输出。</p>
-      </div>
-    </div>
-  </main>
-  <footer>
-    <div>© 2026 Aiden Lin. All rights reserved.</div>
-    <div class="socials">
-      <a href="#">GitHub</a>
-      <a href="#">Twitter</a>
-      <a href="#">Email</a>
-    </div>
-  </footer>
+  <div class="card">
+    <h1>Aiden.L | Web Architect</h1>
+    <p>专注于构建极速、安全与高可扩展的微服务系统。</p>
+  </div>
 </body>
 </html>`;
 
 app.get('/favicon.ico', (req, res) => res.status(204).end());
-
 app.get('/robots.txt', (req, res) => {
   res.set('Server', 'nginx/1.27.3');
   res.type('text/plain').send('User-agent: *\nDisallow: /');
 });
 
-// 根目录：返回精美伪装个人博客页
-app.get('/', (req, res) => {
-  res.set({
-    'Content-Type': 'text/html; charset=utf-8',
-    'Server': 'nginx/1.27.3',
-    'Cache-Control': 'public, max-age=3600'
-  });
-  res.send(BLOG_HTML);
+app.get('/', async (req, res) => {
+  res.set({ 'Server': 'nginx/1.27.3' });
+  try {
+    const targetUrl = new URL(req.url, CAMOUFLAGE_URL).toString();
+    const parsedUrl = new URL(targetUrl);
+    const client = parsedUrl.protocol === 'https:' ? https : http;
+
+    const proxyReq = client.request(targetUrl, {
+      method: req.method,
+      headers: {
+        ...req.headers,
+        host: parsedUrl.host,
+        'accept-encoding': 'identity'
+      }
+    }, (proxyRes) => {
+      res.writeHead(proxyRes.statusCode, proxyRes.headers);
+      proxyRes.pipe(res);
+    });
+
+    proxyReq.on('error', () => {
+      res.set({ 'Content-Type': 'text/html; charset=utf-8' });
+      res.send(BLOG_HTML);
+    });
+    req.pipe(proxyReq);
+  } catch (err) {
+    res.set({ 'Content-Type': 'text/html; charset=utf-8' });
+    res.send(BLOG_HTML);
+  }
 });
 
-// 订阅路由：返回动态生成的SWR缓存订阅 (智能识别客户端下发顶配配置)
-app.get(`/${SUB_PATH}`, async (req, res) => {
+// 订阅服务路由（自动分发 Clash YAML / SingBox JSON 格式）
+app.get(`/${SUB_PATH}-sub`, async (req, res) => {
   const ua = (req.headers['user-agent'] || '').toLowerCase();
   const isClient = Buffer.from('c2hhZG93cm9ja2V0LHYycmF5LGNsYXNoLG5la28sc2luZy1ib3gscXVhbnR1bXVsdCxzdXJnZSxzdGFzaCxsb29uLG5zc3Vi', 'base64').toString().split(',').some(c => ua.includes(c));
 
   if (!isClient) {
-    res.set({
-      'Content-Type': 'text/html; charset=utf-8',
-      'Server': 'nginx/1.27.3'
-    });
+    res.set({ 'Content-Type': 'text/html; charset=utf-8', 'Server': 'nginx/1.27.3' });
     res.status(404).send(NGINX_404);
     return;
   }
 
   try {
-    const pCS = Buffer.from('Y2xhc2g=', 'base64').toString();
-    const isCS = [pCS, 'mihomo', 'stash'].some(c => ua.includes(c));
-    if (isCS) {
-      const isp = await getMetaInfoWithRace();
-      const nodeName = NAME ? `${NAME}-${isp}` : isp;
-      const csYaml = buildCSConfig(nodeName);
+    const isp = await getMetaInfoWithRace();
+    const nodeName = NAME ? `${NAME}-${isp}` : isp;
+
+    if (ua.includes('sing-box')) {
+      res.set({ 'Content-Type': 'application/json; charset=utf-8', 'Server': 'nginx/1.27.3' });
+      res.send(JSON.stringify(buildSingBoxConfig(nodeName), null, 2));
+    } else if (['clash', 'mihomo', 'stash'].some(c => ua.includes(c))) {
       res.set({
         'Content-Type': 'application/yaml; charset=utf-8',
-        'Content-Disposition': `attachment; filename="${pCS}.yaml"`,
+        'Content-Disposition': `attachment; filename="clash.yaml"`,
         'Server': 'nginx/1.27.3'
       });
-      res.send(csYaml);
+      res.send(buildCSConfig(nodeName));
     } else {
       const subData = await getDynamicSub();
-      res.set({
-        'Content-Type': 'text/plain; charset=utf-8',
-        'Server': 'nginx/1.27.3'
-      });
+      res.set({ 'Content-Type': 'text/plain; charset=utf-8', 'Server': 'nginx/1.27.3' });
       res.send(subData);
     }
   } catch (err) {
@@ -974,17 +688,29 @@ app.get(`/${SUB_PATH}`, async (req, res) => {
 
 // ==================== 主动探测伪装阻断 ====================
 function rejectConnection(ws) {
-  const delay = 150 + Math.floor(Math.random() * 450); // 随机 150ms~600ms 延迟
+  const delay = 150 + Math.floor(Math.random() * 450);
   setTimeout(() => {
     try {
       if (ws.readyState === WebSocket.OPEN) {
-        // 模仿发送一段看似正常的网页响应数据给探测器，再强制断开
         ws.send(Buffer.from("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\nServer: nginx/1.27.3\r\n\r\n" + BLOG_HTML));
         ws.close();
       }
     } catch (e) {}
     throttleGC();
   }, delay);
+}
+
+// ==================== 19. 流量包长度随机化填充（指纹干扰） ====================
+class FragmentTransform extends Transform {
+  _transform(chunk, encoding, callback) {
+    let pos = 0;
+    while (pos < chunk.length) {
+      const size = 150 + Math.floor(Math.random() * 1150);
+      this.push(chunk.slice(pos, pos + size));
+      pos += size;
+    }
+    callback();
+  }
 }
 
 // ==================== 原生协议解析核心 ====================
@@ -1013,15 +739,16 @@ function hVl(ws, msg) {
       .then(resolvedIP => {
         net.connect({ host: resolvedIP, port }, function () {
           this.write(msg.slice(i));
-          pipeline(duplex, this).catch(() => {});
-          pipeline(this, duplex).catch(() => {});
+          // 21. Node.js 异步流回压控制 (基于 pipeline)
+          pipeline(duplex, new FragmentTransform(), this, () => {});
+          pipeline(this, new FragmentTransform(), duplex, () => {});
         }).on('error', () => { ws.close(); });
       })
       .catch(() => {
         net.connect({ host, port }, function () {
           this.write(msg.slice(i));
-          pipeline(duplex, this).catch(() => {});
-          pipeline(this, duplex).catch(() => {});
+          pipeline(duplex, new FragmentTransform(), this, () => {});
+          pipeline(this, new FragmentTransform(), duplex, () => {});
         }).on('error', () => { ws.close(); });
       });
   } catch (err) {
@@ -1029,7 +756,6 @@ function hVl(ws, msg) {
   }
 }
 
-// 原生安全 UDP 转发
 function hVlU(ws, initialMsg, offset, host, port) {
   try {
     if (isBlockedDomain(host) || port === 53) {
@@ -1037,7 +763,7 @@ function hVlU(ws, initialMsg, offset, host, port) {
       return;
     }
 
-    ws.send(new Uint8Array([0, 0])); // 握手成功响应
+    ws.send(new Uint8Array([0, 0]));
 
     const udpSocket = dgram.createSocket('udp4');
     const duplex = createWebSocketStream(ws);
@@ -1104,7 +830,6 @@ function hVlU(ws, initialMsg, offset, host, port) {
 function hTr(ws, msg) {
   try {
     const receivedPasswordHash = msg.slice(0, 56).toString();
-
     if (receivedPasswordHash !== TROJAN_HASH) {
       rejectConnection(ws);
       return;
@@ -1164,8 +889,8 @@ function hTr(ws, msg) {
           if (offset < msg.length) {
             this.write(msg.slice(offset));
           }
-          pipeline(duplex, this).catch(() => {});
-          pipeline(this, duplex).catch(() => {});
+          pipeline(duplex, new FragmentTransform(), this, () => {});
+          pipeline(this, new FragmentTransform(), duplex, () => {});
         }).on('error', () => { ws.close(); });
       })
       .catch(() => {
@@ -1173,8 +898,8 @@ function hTr(ws, msg) {
           if (offset < msg.length) {
             this.write(msg.slice(offset));
           }
-          pipeline(duplex, this).catch(() => {});
-          pipeline(this, duplex).catch(() => {});
+          pipeline(duplex, new FragmentTransform(), this, () => {});
+          pipeline(this, new FragmentTransform(), duplex, () => {});
         }).on('error', () => { ws.close(); });
       });
   } catch (err) {
@@ -1182,34 +907,33 @@ function hTr(ws, msg) {
   }
 }
 
-// ==================== 主启动 ====================
-// 探测防御：接管普通HTTP GET请求，重定向或返回网页伪装
-const argoHttpServer = http.createServer((req, res) => {
-  const urlPath = req.url.split('?')[0];
-  if (['/api/v3/telemetry', '/graphql/stream'].includes(urlPath)) {
-    res.writeHead(302, { 'Location': '/' });
-    res.end();
-  } else {
-    // 核心安全升级：将普通 HTTP 请求直接流转给内部的 Express 处理，实现单隧道单端口承载全套服务，完全不需要在公网暴露任何容器端口！
-    app(req, res);
-  }
-});
+// ==================== 17. 单端口全服务复用 (合并 Express & WS) ====================
+const server = http.createServer(app);
 
-const wss = new WebSocket.Server({
-  server: argoHttpServer,
-  handleProtocols: (protocols, req) => {
-    const list = Array.from(protocols);
-    return list[0] || false;
+// 12. HTTP 服务连接超时限制 (防御 Slowloris DDoS)
+server.headersTimeout = 30000;
+server.requestTimeout = 30000;
+server.keepAliveTimeout = 30000;
+
+const wss = new WebSocket.Server({ noServer: true });
+
+server.on('upgrade', (req, socket, head) => {
+  const urlPath = req.url.split('?')[0];
+  if ([`/${SUB_PATH}`, `/${SUB_PATH}-tr`].includes(urlPath)) {
+    wss.handleUpgrade(req, socket, head, (ws) => {
+      wss.emit('connection', ws, req);
+    });
+  } else {
+    socket.destroy();
   }
 });
 
 wss.on('connection', (ws, req) => {
   const urlPath = req.url.split('?')[0];
-
   let accumulated = Buffer.alloc(0);
   let resolvedHeader = false;
 
-  // 3秒握手超时保护机制（防止空连接挂起测速超时，并抵御慢速连接DDoS）
+  // 23. WebSocket 连接握手 3 秒硬超时保护
   const handshakeTimer = setTimeout(() => {
     if (!resolvedHeader) {
       ws.off('message', onMessage);
@@ -1217,32 +941,27 @@ wss.on('connection', (ws, req) => {
     }
   }, 3000);
 
-  // 提取并解析 WebSocket Early Data (Sec-WebSocket-Protocol)
+  // 解析 WebSocket Early Data (0-RTT)
   const protocolHeader = req.headers['sec-websocket-protocol'];
   if (protocolHeader) {
     try {
       const protocols = protocolHeader.split(',').map(p => p.trim());
-      // 忽略标准协议名称，尝试解析 Base64/Base64url 格式的早期数据
       const target = protocols[0];
-      if (target && target !== String.fromCharCode(118, 108, 101, 115, 115) && target !== String.fromCharCode(116, 114, 111, 106, 97, 110)) {
+      if (target && target !== 'vless' && target !== 'trojan') {
         let base64Str = target.replace(/-/g, '+').replace(/_/g, '/');
-        while (base64Str.length % 4) {
-          base64Str += '=';
-        }
+        while (base64Str.length % 4) base64Str += '=';
         const earlyData = Buffer.from(base64Str, 'base64');
         if (earlyData.length > 0) {
           accumulated = Buffer.concat([earlyData, accumulated]);
         }
       }
-    } catch (e) {
-    }
+    } catch (e) {}
   }
 
   const parseHeader = () => {
     if (resolvedHeader) return;
     try {
-      // 1. VL (/api/v3/telemetry)
-      if (urlPath === '/api/v3/telemetry') {
+      if (urlPath === `/${SUB_PATH}`) {
         if (accumulated.length < 18) return;
         const addonsLen = accumulated[17];
         const headerMin = 22 + addonsLen;
@@ -1252,15 +971,12 @@ wss.on('connection', (ws, req) => {
         const atyp = accumulated[headerMin - 1];
         let fullHeaderLen = headerMin;
 
-        if (atyp === 1) {
-          fullHeaderLen += 4;
-        } else if (atyp === 2) {
+        if (atyp === 1) fullHeaderLen += 4;
+        else if (atyp === 2) {
           if (accumulated.length < headerMin + 1) return;
-          const hostLen = accumulated[headerMin];
-          fullHeaderLen += 1 + hostLen;
-        } else if (atyp === 3) {
-          fullHeaderLen += 16;
-        } else {
+          fullHeaderLen += 1 + accumulated[headerMin];
+        } else if (atyp === 3) fullHeaderLen += 16;
+        else {
           ws.off('message', onMessage);
           rejectConnection(ws);
           return;
@@ -1273,8 +989,7 @@ wss.on('connection', (ws, req) => {
         ws.off('message', onMessage);
 
         const id = accumulated.slice(1, 17);
-        const isVl = id.equals(UUID_BUFFER);
-        if (!isVl) {
+        if (!id.equals(UUID_BUFFER)) {
           rejectConnection(ws);
           return;
         }
@@ -1291,19 +1006,13 @@ wss.on('connection', (ws, req) => {
           return;
         }
 
-        if (cmd === 0x02) {
-          hVlU(ws, accumulated, i, host, port);
-        } else {
-          hVl(ws, accumulated);
-        }
+        if (cmd === 0x02) hVlU(ws, accumulated, i, host, port);
+        else hVl(ws, accumulated);
       }
-      // 2. TR (/graphql/stream)
-      else if (urlPath === '/graphql/stream') {
+      else if (urlPath === `/${SUB_PATH}-tr`) {
         if (accumulated.length < 58) return;
         let offset = 56;
-        if (accumulated[offset] === 0x0d && accumulated[offset + 1] === 0x0a) {
-          offset += 2;
-        }
+        if (accumulated[offset] === 0x0d && accumulated[offset + 1] === 0x0a) offset += 2;
         if (accumulated.length < offset + 2) return;
 
         const cmd = accumulated[offset];
@@ -1311,15 +1020,12 @@ wss.on('connection', (ws, req) => {
         offset += 2;
 
         let fullLen = offset;
-        if (atyp === 0x01) {
-          fullLen += 4 + 2;
-        } else if (atyp === 0x03) {
+        if (atyp === 0x01) fullLen += 6;
+        else if (atyp === 0x03) {
           if (accumulated.length < offset + 1) return;
-          const hostLen = accumulated[offset];
-          fullLen += 1 + hostLen + 2;
-        } else if (atyp === 0x04) {
-          fullLen += 16 + 2;
-        } else {
+          fullLen += 1 + accumulated[offset] + 2;
+        } else if (atyp === 0x04) fullLen += 18;
+        else {
           ws.off('message', onMessage);
           rejectConnection(ws);
           return;
@@ -1349,10 +1055,7 @@ wss.on('connection', (ws, req) => {
   };
 
   ws.on('message', onMessage);
-
-  if (accumulated.length > 0) {
-    parseHeader();
-  }
+  if (accumulated.length > 0) parseHeader();
 
   ws.on('close', () => {
     ws.off('message', onMessage);
@@ -1360,81 +1063,299 @@ wss.on('connection', (ws, req) => {
   });
 });
 
-async function startserver() {
-  try {
-    await refreshSubSync();
-  } catch (e) {
-    console.error('[startup] refreshSubSync error:', e.message || e);
+// ==================== 下载 ====================
+const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+
+async function downloadToBuffer(url) {
+  return new Promise((resolve, reject) => {
+    const client = url.startsWith('https') ? https : http;
+    const req = client.get(url, { headers: { 'User-Agent': UA }, timeout: 120000 }, (res) => {
+      if (res.statusCode < 200 || res.statusCode >= 300) {
+        return reject(new Error(`Status Code: ${res.statusCode}`));
+      }
+      const chunks = [];
+      res.on('data', chunk => chunks.push(chunk));
+      res.on('end', () => resolve(Buffer.concat(chunks)));
+      res.on('error', reject);
+    });
+    req.on('error', reject);
+  });
+}
+
+let cloudflaredBuffer = null;
+
+async function installCloudflared() {
+  if (cloudflaredBuffer) return;
+  const vipArch = arch === 'arm64' ? 'arm64' : 'amd64';
+  const urls = [
+    `https://github.com/godeluoo1/ko-vip/releases/latest/download/bot-linux-${vipArch}`,
+    `https://mirror.ghproxy.com/https://github.com/godeluoo1/ko-vip/releases/latest/download/bot-linux-${vipArch}`,
+    `https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${arch}`,
+    `https://mirror.ghproxy.com/https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${arch}`
+  ];
+
+  for (let i = 0; i < urls.length; i++) {
+    try {
+      cloudflaredBuffer = await downloadToBuffer(urls[i]);
+      console.log(`[cf] 二进制数据成功下载至内存，缓存大小: ${cloudflaredBuffer.length} 字节。`);
+      return;
+    } catch (e) {
+      console.error(`[cf] 下载源 ${urls[i]} 失败，切换重试...`);
+    }
+  }
+  throw new Error('cloudflared: 所有的二进制下载源均失败');
+}
+
+// ==================== 20. Linux 内存无盘执行 (memfd_create RAM Execution) ====================
+function startProcess(label, args, extraEnv = {}) {
+  let child;
+  const combinedEnv = { ...process.env, ...extraEnv };
+
+  // 检测宿主 Python3 是否可用以及是否具有 memfd_create 系统调用
+  const hasPythonMemfd = (() => {
+    try {
+      require('child_process').execSync('python3 -c "import os; hasattr(os, \\"memfd_create\\")"', { stdio: 'ignore' });
+      return true;
+    } catch (e) {
+      return false;
+    }
+  })();
+
+  if (isLinux && hasPythonMemfd && cloudflaredBuffer) {
+    console.log('[cf] Linux 环境且支持 memfd_create，启动 RAM 内存匿名描述符无盘执行模式 (fexecve 仿制)...');
+
+    // 通过 Python 执行，将 stdin 里的二进制流读入 memfd_create 并 execve 执行
+    const pyScript = `import os, sys
+fd = os.memfd_create("cf-bin")
+os.write(fd, sys.stdin.buffer.read())
+os.execve(f"/proc/self/fd/{fd}", ["cf-bin"] + sys.argv[1:], os.environ)
+`;
+    child = spawn('python3', ['-c', pyScript, ...args], {
+      stdio: ['pipe', 'ignore', 'pipe'],
+      env: combinedEnv
+    });
+
+    // 写入内存中的二进制数据到管道
+    child.stdin.write(cloudflaredBuffer);
+    child.stdin.end();
+  } else {
+    // 降级回退到 /dev/shm 内存虚拟盘执行（或正常磁盘临时运行）
+    console.log('[cf] 降级至内存虚拟盘 /dev/shm 或本地临时目录执行...');
+    try {
+      fs.writeFileSync(botPath, cloudflaredBuffer);
+      fs.chmodSync(botPath, 0o755);
+    } catch (e) {
+      console.error('[cf] 二进制写入内存虚拟盘失败，尝试写入本地磁盘临时目录:', e.message);
+    }
+
+    child = spawn(botPath, args, {
+      stdio: ['ignore', 'ignore', 'pipe'],
+      env: combinedEnv
+    });
   }
 
-  argoHttpServer.listen(ARGO_PORT, '127.0.0.1', () => {
-    console.log(`[INFO] Web Service backend initialized on port ${ARGO_PORT}.`);
+  child.stderr && child.stderr.on('data', d => {
+    const msg = d.toString();
+    console.error(`[${label}]`, msg.trim());
+
+    // 10. 临时隧道动态域名自动提取并写入内存订阅 (trycloudflare 动态正则抓取)
+    const match = msg.match(/https:\/\/([a-zA-Z0-9-]+\.trycloudflare\.com)/);
+    if (match && match[1]) {
+      ARGO_DOMAIN = match[1];
+      console.log(`[cf] 动态 Quick Tunnel 域名自动提取成功: ${ARGO_DOMAIN}`);
+      refreshSubSync().catch(() => {});
+    }
   });
 
-  try {
-    // 自动托管 Cloudflare API Token 转换为真实 Tunnel Token
-    await autoConfigureArgoTunnel();
-  } catch (e) {
-    console.error('[startup] autoConfigureArgoTunnel error:', e.message || e);
+  managedChildren.set(label, child);
+  child.on('error', () => managedChildren.delete(label));
+  child.on('close', (code) => {
+    managedChildren.delete(label);
+    if (isShuttingDown) return;
+    if (label === 'cf') {
+      console.error(`[cf] Argo Tunnel 异常退出 (Code: ${code})，10秒后自愈重试...`);
+      setTimeout(() => {
+        if (!isShuttingDown) {
+          try { startCloudflared(); } catch (e) {}
+        }
+      }, 10000);
+    } else {
+      process.exit(1);
+    }
+  });
+  return child;
+}
+
+function startCloudflared() {
+  const base = ['tunnel', '--edge-ip-version', EDGE_IP_VERSION, '--no-autoupdate', '--loglevel', 'fatal', '--protocol', ARGO_PROTOCOL];
+
+  if (tunnelMode === 'json') {
+    const creds = JSON.parse(ARGO_AUTH);
+    const tid = creds.TunnelID || creds.tunnel_id || creds.TunnelName || creds.tunnel_name;
+    fs.writeFileSync(tunnelJsonPath, ARGO_AUTH);
+    fs.writeFileSync(tunnelYmlPath, [
+      `tunnel: ${tid}`, `credentials-file: ${tunnelJsonPath}`, `protocol: ${ARGO_PROTOCOL}`,
+      'ingress:', `  - hostname: ${ARGO_DOMAIN}`, `    service: http://127.0.0.1:${PORT}`, '  - service: http_status:404',
+    ].join('\n'));
+    return startProcess('cf', [...base, '--config', tunnelYmlPath, 'run']);
   }
+
+  if (tunnelMode === 'token') {
+    // 7. 二进制参数隐蔽伪装，通过环境变量传递 token，防 ps -aux 嗅探
+    return startProcess('cf', [...base, 'run'], { TUNNEL_TOKEN: ARGO_AUTH });
+  }
+}
+
+async function autoConfigureArgoTunnel() {
+  if (ARGO_AUTH.includes('TunnelSecret') || ARGO_AUTH.length > 100) return;
+
+  if (ARGO_AUTH.length >= 30 && ARGO_AUTH.length <= 60) {
+    console.log('[cf] 启动 Cloudflare API 自动配置与 DNS CNAME 记录托管绑定...');
+    try {
+      const tunnelName = ARGO_DOMAIN.split('.')[0];
+      const rootDomain = ARGO_DOMAIN.substring(tunnelName.length + 1);
+
+      const cfRequest = (method, path, body = null) => {
+        return new Promise((resolve, reject) => {
+          const data = body ? JSON.stringify(body) : '';
+          const req = https.request({
+            hostname: 'api.cloudflare.com',
+            port: 443,
+            path: '/client/v4' + path,
+            method: method,
+            headers: {
+              'Authorization': `Bearer ${ARGO_AUTH}`,
+              'Content-Type': 'application/json',
+              'Content-Length': Buffer.byteLength(data)
+            },
+            timeout: 15000
+          }, (res) => {
+            let resData = '';
+            res.on('data', chunk => resData += chunk);
+            res.on('end', () => {
+              try { resolve({ data: JSON.parse(resData) }); } catch (e) { resolve({ data: resData }); }
+            });
+          });
+          req.on('error', reject);
+          if (body) req.write(data);
+          req.end();
+        });
+      };
+
+      const zoneRes = await cfRequest('GET', `/zones?name=${rootDomain}`);
+      if (!zoneRes.data || !zoneRes.data.result || zoneRes.data.result.length === 0) {
+        throw new Error(`未找到根域名 ${rootDomain} 对应的 Zone ID`);
+      }
+      const zoneId = zoneRes.data.result[0].id;
+      const accountId = zoneRes.data.result[0].account.id;
+
+      const tunnelListRes = await cfRequest('GET', `/accounts/${accountId}/cfd_tunnel?is_deleted=false`);
+      const tunnels = tunnelListRes.data.result || [];
+      const existingTunnel = tunnels.find(t => t.name === tunnelName);
+
+      let tunnelId = '';
+      let realToken = '';
+
+      if (existingTunnel) {
+        tunnelId = existingTunnel.id;
+        const tokenRes = await cfRequest('GET', `/accounts/${accountId}/cfd_tunnel/${tunnelId}/token`);
+        realToken = tokenRes.data.result;
+      } else {
+        const tunnelSecret = crypto.randomBytes(32).toString('base64');
+        const createRes = await cfRequest('POST', `/accounts/${accountId}/cfd_tunnel`, {
+          name: tunnelName,
+          config_src: 'cloudflare',
+          tunnel_secret: tunnelSecret
+        });
+        tunnelId = createRes.data.result.id;
+        realToken = createRes.data.result.token;
+      }
+
+      // 17. 单端口合并分流，全域名 Ingress 简化路由
+      await cfRequest('PUT', `/accounts/${accountId}/cfd_tunnel/${tunnelId}/configurations`, {
+        config: {
+          ingress: [
+            { hostname: ARGO_DOMAIN, service: `http://127.0.0.1:${PORT}` },
+            { service: 'http_status:404' }
+          ]
+        }
+      });
+
+      const dnsListRes = await cfRequest('GET', `/zones/${zoneId}/dns_records?type=CNAME&name=${ARGO_DOMAIN}`);
+      const dnsRecords = dnsListRes.data.result || [];
+      const existingDns = dnsRecords[0];
+      const dnsPayload = {
+        name: ARGO_DOMAIN,
+        type: 'CNAME',
+        content: `${tunnelId}.cfargotunnel.com`,
+        proxied: true
+      };
+
+      if (existingDns) {
+        if (existingDns.content !== `${tunnelId}.cfargotunnel.com`) {
+          await cfRequest('PATCH', `/zones/${zoneId}/dns_records/${existingDns.id}`, dnsPayload);
+        }
+      } else {
+        await cfRequest('POST', `/zones/${zoneId}/dns_records`, dnsPayload);
+      }
+
+      if (realToken) {
+        ARGO_AUTH = realToken;
+        tunnelMode = 'token';
+        console.log('[cf] Cloudflare API 自动配置与 DNS CNAME 成功托管！');
+      }
+    } catch (e) {
+      console.error('[cf] API 自动接管配置失败，回退为手动或 Quick 隧道模式:', e.message);
+    }
+  }
+}
+
+function scheduleCleanup() {
+  setTimeout(() => {
+    cleanupFiles.forEach(f => { try { fs.rmSync(f, { force: true }); } catch (e) {} });
+  }, 15000);
+}
+
+// ==================== 主启动服务 ====================
+async function startserver() {
+  // 5. FreeBSD 端口规则自动检测与自我治理优先执行
+  await healFreeBSDPorts();
+
+  try {
+    await refreshSubSync();
+  } catch (e) {}
+
+  server.listen(PORT, '0.0.0.0', () => {
+    console.log(`[INFO] 原生单端口服务合并成功。网关与 Websocket 服务已在端口 ${PORT} 上线运行。`);
+  });
+
+  await autoConfigureArgoTunnel();
 
   try {
     await installCloudflared();
     startCloudflared();
   } catch (e) {
-    console.error('[startup] cloudflared installation/start error:', e.message || e);
+    console.error('[startup] 隧道启动异常:', e.message);
   }
 
   scheduleCleanup();
 }
 
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`[INFO] Server listening on port ${PORT}`);
-  console.log(`[INFO] Camouflage blog static pages pre-rendered successfully.`);
-});
+startserver().catch(e => { console.error('[startup] 启动异常:', e.message); process.exit(1); });
 
-startserver().catch(e => { console.error('[startup]', e.message || e); process.exit(1); });
+// ==================== 4. 随机化内部防休眠自保活 & 6. 冷启动保活延迟 ====================
+const KEEP_ALIVE_PATHS = ['/', '/robots.txt', `/${SUB_PATH}-sub`];
 
-// ==================== 优雅退出 ====================
-async function shutdown() {
-  if (isShuttingDown) return;
-  isShuttingDown = true;
-  
-  try { argoHttpServer.close(); } catch(e) {}
-  
-  const ps = [];
-  for (const [, child] of managedChildren) {
-    if (child && !child.killed) {
-      ps.push(new Promise(r => {
-        const t = setTimeout(() => { try { child.kill('SIGKILL'); } catch (e) {} r(); }, 5000);
-        child.once('close', () => { clearTimeout(t); r(); });
-        try { child.kill('SIGTERM'); } catch (e) {}
-      }));
-    }
-  }
-  await Promise.all(ps);
-  
-  // 退出前彻底删除二进制，保障零残留
-  try { fs.rmSync(botPath, { force: true }); } catch (e) {}
-  
-  process.exit(0);
-}
-
-process.on('SIGTERM', shutdown);
-process.on('SIGINT', shutdown);
-process.on('uncaughtException', () => process.exit(1));
-process.on('unhandledRejection', () => process.exit(1));
-
-// ==================== 防休眠 ====================
-const KEEP_ALIVE_PATHS = ['/', '/index.html', '/about', '/contact', '/api/status'];
-
-(function keepAlive() {
-  const lo = 4 * 60000, hi = 8 * 60000;
-  (function tick() {
-    setTimeout(() => {
-      const randomPath = KEEP_ALIVE_PATHS[Math.floor(Math.random() * KEEP_ALIVE_PATHS.length)];
-      http.get(`http://127.0.0.1:${PORT}${randomPath}`, r => r.resume()).on('error', () => {});
-      tick();
-    }, lo + Math.floor(Math.random() * (hi - lo)));
+setTimeout(() => {
+  (function keepAlive() {
+    const lo = 4 * 60000, hi = 8 * 60000;
+    (function tick() {
+      setTimeout(() => {
+        if (isShuttingDown) return;
+        const randomPath = KEEP_ALIVE_PATHS[Math.floor(Math.random() * KEEP_ALIVE_PATHS.length)];
+        http.get(`http://127.0.0.1:${PORT}${randomPath}`, r => r.resume()).on('error', () => {});
+        tick();
+      }, lo + Math.floor(Math.random() * (hi - lo)));
+    })();
   })();
-})();
+}, 10000); // 冷启动异步延迟 10 秒后执行保活，防止开机瞬间触发系统网络安全规则
