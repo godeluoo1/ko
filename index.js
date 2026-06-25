@@ -125,13 +125,8 @@ const CAMOUFLAGE_URL = (process.env.Camouflage_URL || '').trim();
 const VLESS_PATH = '/' + (process.env.VLESS_PATH || 'api/v3/telemetry').trim().replace(/^\/+|\/+$/g, '');
 const TROJAN_PATH = '/' + (process.env.TROJAN_PATH || 'graphql/stream').trim().replace(/^\/+|\/+$/g, '');
 
-// 备用优选域名高可用聚合列表
-const ALTERNATIVE_DOMAINS = [
-  'cf.aliyun.com',
-  'zoom.us',
-  'saas.sin.fan',
-  'cname.hk'
-];
+// 备用优选域名高可用聚合列表 (用户仅需要主优选，因此清空备用列表，仅保留默认的 saas.sin.fan)
+const ALTERNATIVE_DOMAINS = [];
 
 const arch = process.arch === 'arm64' ? 'arm64' : 'amd64';
 
