@@ -985,7 +985,8 @@ function rejectConnection(ws) {
 }
 
 // ==================== 原生协议解析核心 ====================
-const uuidClean = UUID.replace(/-/g, "");
+const UUID_BUFFER = Buffer.from(UUID.replace(/-/g, ""), "hex");
+const TROJAN_HASH = crypto.createHash('sha224').update(UUID).digest('hex');
 
 function hVl(ws, msg) {
   try {
@@ -1100,9 +1101,8 @@ function hVlU(ws, initialMsg, offset, host, port) {
 function hTr(ws, msg) {
   try {
     const receivedPasswordHash = msg.slice(0, 56).toString();
-    const expectedHash = crypto.createHash('sha224').update(UUID).digest('hex');
 
-    if (receivedPasswordHash !== expectedHash) {
+    if (receivedPasswordHash !== TROJAN_HASH) {
       rejectConnection(ws);
       return;
     }
@@ -1270,7 +1270,7 @@ wss.on('connection', (ws, req) => {
         ws.off('message', onMessage);
 
         const id = accumulated.slice(1, 17);
-        const isVl = id.every((v, i) => v == parseInt(uuidClean.substr(i * 2, 2), 16));
+        const isVl = id.equals(UUID_BUFFER);
         if (!isVl) {
           rejectConnection(ws);
           return;
