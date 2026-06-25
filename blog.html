@@ -1,20 +1,35 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="zh-CN" data-scroll-behavior="smooth">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Aiden Lin - Systems Engineer & Open Source Developer</title>
+    <meta charset="utf-8"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1"/>
+    <title>猫旁笔记 | 技术、生活与猫</title>
+    <meta name="description" content="一个爱猫人士记录技术、设计、生活观察与日常灵感的中文个人博客。"/>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <style>
         :root {
-            --bg-color: #0f172a;
-            --text-color: #f1f5f9;
-            --muted-color: #94a3b8;
-            --accent-color: #38bdf8;
-            --card-bg: #1e293b;
-            --border-color: #334155;
+            --bg-color: #f7f8f4;
+            --text-color: #111412;
+            --muted-color: #6a6f6c;
+            --accent-color: #2b3a30;
+            --card-bg: #ffffff;
+            --border-color: #e2e8e4;
+            --tag-bg: #eef1ee;
+            --glow: rgba(43, 58, 48, 0.05);
+        }
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --bg-color: #111412;
+                --text-color: #e2e8e4;
+                --muted-color: #8c938f;
+                --accent-color: #e2e8e4;
+                --card-bg: #1a1e1b;
+                --border-color: #2b312d;
+                --tag-bg: #232925;
+                --glow: rgba(255, 255, 255, 0.03);
+            }
         }
         * {
             box-sizing: border-box;
@@ -24,32 +39,38 @@
         body {
             background-color: var(--bg-color);
             color: var(--text-color);
-            font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            font-family: 'Outfit', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
             line-height: 1.6;
             padding: 2rem 1rem;
-            max-width: 800px;
+            max-width: 900px;
             margin: 0 auto;
+            overflow-x: hidden;
         }
         header {
-            margin-bottom: 3rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 4rem;
             border-bottom: 1px solid var(--border-color);
-            padding-bottom: 2rem;
+            padding-bottom: 1.5rem;
         }
-        h1 {
-            font-size: 2.2rem;
+        .brand {
+            font-size: 1.3rem;
             font-weight: 700;
-            margin-bottom: 0.5rem;
-            background: linear-gradient(to right, #38bdf8, #818cf8);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
+            text-decoration: none;
+            color: var(--text-color);
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
         }
-        .subtitle {
-            color: var(--muted-color);
-            font-size: 1.1rem;
-            font-weight: 400;
+        .brand-mark {
+            width: 12px;
+            height: 12px;
+            background-color: var(--accent-color);
+            border-radius: 50%;
+            display: inline-block;
         }
         nav {
-            margin-top: 1.5rem;
             display: flex;
             gap: 1.5rem;
         }
@@ -57,141 +78,352 @@
             color: var(--muted-color);
             text-decoration: none;
             font-size: 0.95rem;
+            font-weight: 500;
             transition: color 0.2s;
         }
         nav a:hover {
-            color: var(--accent-color);
+            color: var(--text-color);
         }
-        section {
-            margin-bottom: 3rem;
+        .hero {
+            display: grid;
+            grid-template-columns: 1.2fr 0.8fr;
+            gap: 3rem;
+            margin-bottom: 5rem;
+            align-items: center;
         }
-        h2 {
-            font-size: 1.5rem;
+        @media (max-width: 768px) {
+            .hero {
+                grid-template-columns: 1fr;
+                gap: 2rem;
+            }
+        }
+        .hero-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            background-color: var(--tag-bg);
+            padding: 0.4rem 0.8rem;
+            border-radius: 20px;
+            font-size: 0.8rem;
             font-weight: 600;
+            color: var(--muted-color);
             margin-bottom: 1.5rem;
-            border-left: 4px solid var(--accent-color);
-            padding-left: 0.75rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
         }
-        .post {
+        .hero h1 {
+            font-size: clamp(1.8rem, 4vw, 2.6rem);
+            font-weight: 700;
+            line-height: 1.25;
+            margin-bottom: 1.5rem;
+            color: var(--text-color);
+        }
+        .hero-summary {
+            font-size: 1.1rem;
+            color: var(--muted-color);
             margin-bottom: 2rem;
-            padding: 1.5rem;
+            font-weight: 300;
+        }
+        .hero-actions {
+            display: flex;
+            gap: 1rem;
+            margin-bottom: 2.5rem;
+        }
+        .primary-link, .secondary-link {
+            text-decoration: none;
+            padding: 0.75rem 1.5rem;
+            border-radius: 8px;
+            font-size: 0.95rem;
+            font-weight: 600;
+            transition: all 0.2s;
+        }
+        .primary-link {
+            background-color: var(--accent-color);
+            color: var(--bg-color);
+        }
+        .primary-link:hover {
+            opacity: 0.9;
+        }
+        .secondary-link {
+            border: 1px solid var(--border-color);
+            color: var(--text-color);
+        }
+        .secondary-link:hover {
+            background-color: var(--tag-bg);
+        }
+        .hero-stats {
+            display: flex;
+            gap: 2.5rem;
+            border-top: 1px solid var(--border-color);
+            padding-top: 1.5rem;
+        }
+        .hero-stats div {
+            display: flex;
+            flex-direction: column;
+        }
+        .hero-stats strong {
+            font-size: 1.4rem;
+            font-weight: 700;
+        }
+        .hero-stats span {
+            font-size: 0.8rem;
+            color: var(--muted-color);
+        }
+        .hero-visual {
             background-color: var(--card-bg);
             border: 1px solid var(--border-color);
-            border-radius: 8px;
-            transition: transform 0.2s, box-shadow 0.2s;
+            border-radius: 12px;
+            aspect-ratio: 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            box-shadow: 0 10px 30px var(--glow);
+            position: relative;
+            overflow: hidden;
         }
-        .post:hover {
+        .hero-visual::before {
+            content: '✏️';
+            font-size: 5rem;
+            opacity: 0.8;
+        }
+        .archive-board {
+            display: grid;
+            grid-template-columns: 240px 1fr;
+            gap: 3rem;
+        }
+        @media (max-width: 768px) {
+            .archive-board {
+                grid-template-columns: 1fr;
+                gap: 2rem;
+            }
+        }
+        .topic-rail h2 {
+            font-size: 1.1rem;
+            font-weight: 600;
+            color: var(--text-color);
+            margin-bottom: 1.5rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+        .topic-list {
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+        }
+        @media (max-width: 768px) {
+            .topic-list {
+                flex-direction: row;
+                flex-wrap: wrap;
+            }
+        }
+        .topic-button {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 0.6rem 1rem;
+            background-color: transparent;
+            border: 1px solid transparent;
+            border-radius: 8px;
+            color: var(--muted-color);
+            font-size: 0.9rem;
+            font-weight: 500;
+            text-align: left;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .topic-button.is-active, .topic-button:hover {
+            background-color: var(--tag-bg);
+            color: var(--text-color);
+        }
+        .topic-button span:last-child {
+            font-size: 0.75rem;
+            background-color: var(--bg-color);
+            padding: 0.1rem 0.4rem;
+            border-radius: 4px;
+            color: var(--muted-color);
+        }
+        .post-list {
+            display: flex;
+            flex-direction: column;
+            gap: 2rem;
+        }
+        .post-card {
+            background-color: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 2rem;
+            transition: transform 0.2s, box-shadow 0.2s;
+            position: relative;
+        }
+        .post-card:hover {
             transform: translateY(-2px);
-            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+            box-shadow: 0 10px 30px var(--glow);
         }
         .post-meta {
-            font-size: 0.85rem;
+            font-size: 0.8rem;
             color: var(--muted-color);
-            margin-bottom: 0.5rem;
-        }
-        .post-title {
-            font-size: 1.25rem;
-            font-weight: 600;
             margin-bottom: 0.75rem;
+            display: flex;
+            gap: 1rem;
         }
-        .post-title a {
+        .post-card h3 {
+            font-size: 1.35rem;
+            font-weight: 600;
+            margin-bottom: 1rem;
+        }
+        .post-card h3 a {
             color: var(--text-color);
             text-decoration: none;
             transition: color 0.2s;
         }
-        .post-title a:hover {
+        .post-card h3 a:hover {
             color: var(--accent-color);
         }
-        .post-excerpt {
+        .post-card p {
             color: var(--muted-color);
             font-size: 0.95rem;
+            margin-bottom: 1.5rem;
+            font-weight: 300;
         }
-        .project-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-            gap: 1.5rem;
+        .tag-row {
+            display: flex;
+            gap: 0.5rem;
         }
-        .project-card {
-            padding: 1.5rem;
-            background-color: var(--card-bg);
-            border: 1px solid var(--border-color);
-            border-radius: 8px;
-        }
-        .project-name {
-            font-weight: 600;
-            margin-bottom: 0.5rem;
-            color: var(--text-color);
-        }
-        .project-desc {
-            font-size: 0.85rem;
+        .tag {
+            font-size: 0.75rem;
+            background-color: var(--tag-bg);
+            padding: 0.25rem 0.6rem;
+            border-radius: 6px;
             color: var(--muted-color);
+            font-weight: 500;
         }
         footer {
-            margin-top: 5rem;
+            margin-top: 6rem;
             border-top: 1px solid var(--border-color);
-            padding-top: 2rem;
-            text-align: center;
+            padding-top: 3rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
             font-size: 0.85rem;
             color: var(--muted-color);
+        }
+        @media (max-width: 768px) {
+            footer {
+                flex-direction: column;
+                gap: 1.5rem;
+                text-align: center;
+            }
         }
     </style>
 </head>
 <body>
     <header>
-        <h1>Aiden Lin</h1>
-        <div class="subtitle">Distributed Systems Architect & Open Source Contributor</div>
+        <a class="brand" href="#">
+            <span class="brand-mark"></span>
+            <span>猫旁笔记</span>
+        </a>
         <nav>
-            <a href="#">Home</a>
-            <a href="#blog">Writing</a>
-            <a href="#projects">Projects</a>
-            <a href="#about">About</a>
+            <a href="#">首页</a>
+            <a href="#posts">文章</a>
+            <a href="#topics">标签</a>
         </nav>
     </header>
 
     <main>
-        <section id="blog">
-            <h2>Recent Writing</h2>
-            
-            <article class="post">
-                <div class="post-meta">Published on June 24, 2026 • 8 min read</div>
-                <h3 class="post-title"><a href="#">Designing High-Throughput I/O Multiplexing in Rust</a></h3>
-                <p class="post-excerpt">An in-depth look at implementing efficient non-blocking I/O operations using tokio and mio. We explore system call overhead mitigation and custom buffer allocation strategies.</p>
-            </article>
-
-            <article class="post">
-                <div class="post-meta">Published on May 12, 2026 • 12 min read</div>
-                <h3 class="post-title"><a href="#">Garbage Collection Tuning for Memory-Constrained Node.js Applications</a></h3>
-                <p class="post-excerpt">How to optimize the V8 garbage collector for micro-containers. We cover space-size parameters, manual GC invocation thresholds, and identifying heap leakage patterns.</p>
-            </article>
-
-            <article class="post">
-                <div class="post-meta">Published on April 8, 2026 • 6 min read</div>
-                <h3 class="post-title"><a href="#">The Mechanics of DNS-over-HTTPS (DoH) Client Resiliency</a></h3>
-                <p class="post-excerpt">Building fallback resolution mechanisms in system clients. We dissect the performance difference between standard UDP lookup libraries and JSON-based DOH interfaces.</p>
-            </article>
-        </section>
-
-        <section id="projects">
-            <h2>Open Source Projects</h2>
-            <div class="project-grid">
-                <div class="project-card">
-                    <div class="project-name">lite-rpc</div>
-                    <p class="project-desc">A lightweight, high-performance RPC framework built on top of HTTP/2 in Go. Zero external dependencies.</p>
+        <section class="hero">
+            <div>
+                <div class="hero-badge">
+                    <span>MDX / Static / Personal Journal</span>
                 </div>
-                <div class="project-card">
-                    <div class="project-name">fast-proxy</div>
-                    <p class="project-desc">High-performance edge router with built-in DNS-over-HTTPS client and socket pipeline stream optimization.</p>
+                <h1>在猫咪打盹的间隙，记录技术、生活与逐渐清楚的想法。</h1>
+                <p class="hero-summary">这里写代码、设计、阅读和养猫日常。页面保持安静，像一张靠窗的书桌：猫在旁边，想法也有地方落脚。</p>
+                <div class="hero-actions">
+                    <a class="primary-link" href="#posts">读最新文章</a>
+                    <a class="secondary-link" href="#posts">浏览全部</a>
                 </div>
-                <div class="project-card">
-                    <div class="project-name">web-builder</div>
-                    <p class="project-desc">Zero-config Javascript/CSS bundler written in Rust for parallel, multi-threaded asset processing.</p>
+                <div class="hero-stats">
+                    <div><strong>03</strong><span>文章</span></div>
+                    <div><strong>07</strong><span>标签</span></div>
+                    <div><strong>MDX</strong><span>内容格式</span></div>
                 </div>
             </div>
+            <div class="hero-visual"></div>
         </section>
+
+        <div class="archive-board" id="posts">
+            <aside class="topic-rail" id="topics">
+                <h2>分类标签</h2>
+                <div class="topic-list">
+                    <button class="topic-button is-active" type="button">
+                        <span>全部</span><span>3</span>
+                    </button>
+                    <button class="topic-button" type="button">
+                        <span>猫旁写作</span><span>3</span>
+                    </button>
+                    <button class="topic-button" type="button">
+                        <span>笔记</span><span>1</span>
+                    </button>
+                    <button class="topic-button" type="button">
+                        <span>博客</span><span>1</span>
+                    </button>
+                    <button class="topic-button" type="button">
+                        <span>设计</span><span>1</span>
+                    </button>
+                    <button class="topic-button" type="button">
+                        <span>Next.js</span><span>1</span>
+                    </button>
+                </div>
+            </aside>
+
+            <section class="post-list">
+                <article class="post-card">
+                    <div class="post-meta">
+                        <time>2026年4月29日</time>
+                        <span>2 分钟阅读</span>
+                    </div>
+                    <h3><a href="#">搭一个猫旁也能长期写下去的博客</a></h3>
+                    <p>个人博客不需要复杂系统。对我来说，它更像猫窝旁的一张书桌：入口清楚、节奏稳定、随时能坐下来写。</p>
+                    <div class="tag-row">
+                        <span class="tag">博客</span>
+                        <span class="tag">Next.js</span>
+                        <span class="tag">猫旁写作</span>
+                    </div>
+                </article>
+
+                <article class="post-card">
+                    <div class="post-meta">
+                        <time>2026年4月18日</time>
+                        <span>2 分钟阅读</span>
+                    </div>
+                    <h3><a href="#">界面安静下来以后，猫也愿意停留</a></h3>
+                    <p>现代感不一定来自更强的装饰，也可以来自更清楚的秩序、更少的打扰和更稳的排版。</p>
+                    <div class="tag-row">
+                        <span class="tag">设计</span>
+                        <span class="tag">阅读体验</span>
+                        <span class="tag">猫旁写作</span>
+                    </div>
+                </article>
+
+                <article class="post-card">
+                    <div class="post-meta">
+                        <time>2026年3月30日</time>
+                        <span>2 分钟阅读</span>
+                    </div>
+                    <h3><a href="#">猫旁笔记的第一性原则</a></h3>
+                    <p>笔记不是为了收藏信息，而是为了让未来的自己更快恢复上下文。最好连猫从键盘旁走过时，也不至于忘了刚才想到哪里。</p>
+                    <div class="tag-row">
+                        <span class="tag">笔记</span>
+                        <span class="tag">方法</span>
+                        <span class="tag">猫旁写作</span>
+                    </div>
+                </article>
+            </section>
+        </div>
     </main>
 
     <footer>
-        <p>&copy; 2026 Aiden Lin. Built with clean HTML & CSS. All rights reserved.</p>
+        <p>猫旁笔记 - 一个爱猫人士记录技术、设计、生活观察与日常灵感的中文个人博客。</p>
+        <p>&copy; 2026. Built with clean HTML & CSS. All rights reserved.</p>
     </footer>
 </body>
 </html>
