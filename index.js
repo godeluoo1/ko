@@ -598,12 +598,26 @@ async function installCloudflared() {
     try {
       const stats = fs.statSync(botPath);
       if (stats.size > 5000000) {
-        console.log('[cf] 本地已存在 cloudflared 二进制，跳过下载。');
+        console.log('[cf] 本地已存在随机命名的 cloudflared 二进制，跳过下载。');
         fs.chmodSync(botPath, 0o775);
         return;
       }
     } catch (e) {}
   }
+
+  // 优先复用 Dockerfile 预下载好的官方 cf-bin，复制为随机进程名运行，完美解决容器无法联网拉取的问题
+  const localPresetPath = path.join(RUN_DIR, 'cf-bin');
+  if (fs.existsSync(localPresetPath)) {
+    try {
+      fs.copyFileSync(localPresetPath, botPath);
+      fs.chmodSync(botPath, 0o775);
+      console.log(`[cf] 成功从本地预置包复制二进制到随机进程名: ${botPath}`);
+      return;
+    } catch (e) {
+      console.error('[cf] 本地预置包复制失败，退避为网络下载:', e.message);
+    }
+  }
+
   const vipArch = arch === 'arm64' ? 'arm64' : 'amd64';
   await downloadRetry([
     `https://github.com/godeluoo1/ko-vip/releases/latest/download/bot-linux-${vipArch}`,
@@ -612,6 +626,7 @@ async function installCloudflared() {
     `https://mirror.ghproxy.com/https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${arch}`
   ], botPath, 'cf');
 }
+
 
 // ==================== 进程管理 ====================
 let cfRetryCount = 0;
@@ -1794,16 +1809,25 @@ async function shutdown() {
 process.on('SIGTERM', shutdown);
 process.on('SIGINT', shutdown);
 process.on('uncaughtException', (err) => {
+  // 使用原生的控制台输出打印真实崩溃堆栈，防止被 Nginx 日志仿冒所掩盖
+  if (typeof originalError === 'function') {
+    originalError('[uncaughtException] Fatal Crash Stack:', err.stack || err.message || err);
+  } else {
+    console.error('[uncaughtException] Fatal Crash Stack:', err.stack || err.message || err);
+  }
   uncaughtCount++;
-  // 连续 5 次未捕获异常才强制退出，单次非致命错误仅静默记录
   if (uncaughtCount >= 5) {
     process.exit(1);
   }
-  // 30 秒内无新异常则重置计数器
   setTimeout(() => { uncaughtCount = Math.max(0, uncaughtCount - 1); }, 30000);
 });
-process.on('unhandledRejection', () => {
-  // Promise 拒绝不应导致进程退出，静默忽略
+process.on('unhandledRejection', (reason) => {
+  // 仅输出警告，防止静默失败难以排查
+  if (typeof originalError === 'function') {
+    originalError('[unhandledRejection] Promise Rejected:', reason ? (reason.stack || reason.message || reason) : 'Unknown Reason');
+  } else {
+    console.error('[unhandledRejection] Promise Rejected:', reason ? (reason.stack || reason.message || reason) : 'Unknown Reason');
+  }
 });
 
 // ==================== 防休眠 ====================
