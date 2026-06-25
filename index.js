@@ -171,7 +171,7 @@ function throttleGC() {
   if (typeof global.gc === 'function') {
     const now = Date.now();
     const heapUsed = process.memoryUsage().heapUsed;
-    if (heapUsed > 120 * 1024 * 1024 || (now - lastGCTime > 30000)) {
+    if (heapUsed > 45 * 1024 * 1024 || (now - lastGCTime > 30000)) {
       try {
         global.gc();
         lastGCTime = now;
@@ -870,11 +870,33 @@ app.get('/', (req, res) => {
   setNginxHeaders(res, true);
   if (CAMOUFLAGE_URL) {
     const client = CAMOUFLAGE_URL.startsWith('https') ? https : http;
-    client.get(CAMOUFLAGE_URL, (proxyRes) => {
-      res.writeHead(proxyRes.statusCode, proxyRes.headers);
-      proxyRes.pipe(res);
-    }).on('error', () => {
-      res.send(BLOG_HTML);
+    let aborted = false;
+    const proxyReq = client.get(CAMOUFLAGE_URL, (proxyRes) => {
+      if (aborted) return;
+      const safeHeaders = { ...proxyRes.headers };
+      delete safeHeaders['content-length'];
+      delete safeHeaders['connection'];
+      delete safeHeaders['keep-alive'];
+      res.writeHead(proxyRes.statusCode || 200, safeHeaders);
+      
+      const { pipeline } = require('stream');
+      pipeline(proxyRes, res, (err) => {
+        if (err && err.code !== 'ERR_STREAM_PREMATURE_CLOSE') {
+          console.error('[proxy] Pipeline transfer error:', err.message);
+        }
+      });
+    });
+
+    proxyReq.on('error', (err) => {
+      console.error('[proxy] Request error:', err.message);
+      if (!res.headersSent) {
+        res.send(BLOG_HTML);
+      }
+    });
+
+    req.on('close', () => {
+      aborted = true;
+      proxyReq.destroy();
     });
   } else {
     res.send(BLOG_HTML);
