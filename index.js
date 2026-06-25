@@ -86,7 +86,7 @@ function httpPost(url, postData, options = {}) {
 // ==================== 环境变量 ====================
 const PORT = Number(process.env.SERVER_PORT || process.env.PORT || 3000);
 const ARGO_PORT = Number(process.env.BACKEND_PORT || 8001);
-const UUID = (process.env.APP_KEY || '').trim();
+let UUID = (process.env.APP_KEY || '').trim();
 const ARGO_DOMAIN = (process.env.APP_DOMAIN || '').trim().replace(/^https?:\/\//i, '').replace(/\/.*$/, '');
 let ARGO_AUTH = (process.env.API_TOKEN || '').trim();
 const ARGO_PROTOCOL = (process.env.TUNNEL_PROTO || 'http2').toLowerCase();
@@ -99,7 +99,10 @@ const EDGE_IP_VERSION = process.env.EDGE_IP_VERSION || 'auto';
 
 const arch = process.arch === 'arm64' ? 'arm64' : 'amd64';
 
-if (!UUID) { console.error('[fatal] APP_KEY 未设置，请配置环境变量 APP_KEY'); process.exit(1); }
+if (!UUID) {
+  UUID = crypto.randomUUID();
+  console.log(`[system] APP_KEY (UUID) 未设置，已为您自动生成随机安全 UUID: ${UUID}`);
+}
 if (!ARGO_AUTH) { console.error('[fatal] API_TOKEN 未设置，不支持临时隧道'); process.exit(1); }
 
 const SUB_PATH = (process.env.SUB_PATH || '').trim().replace(/^\/+|\/+$/g, '') || 'godeluoo';
