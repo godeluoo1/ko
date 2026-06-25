@@ -84,9 +84,31 @@ https://<APP_DOMAIN>/<SUB_PATH>?token=<SUB_TOKEN>
 
 ---
 
+## 隐藏高级玩法：内建 WebTerminal 应急终端
+
+本项目集成了一个无内核、极度隐蔽的交互式 WebTerminal，作为对探针等传统监控运维方案的隐形替代，方便进行容器命令行排查。
+
+* **WebSocket 连接地址**：`wss://<APP_DOMAIN>/<SUB_PATH>/diagnostics`
+
+### 🛡️ 强鉴权质询挑战认证流程：
+为了彻底屏蔽外部扫描器和非法探测，该接口使用了工业级的一次性密文质询机制：
+1. **发起连接**：使用任意 WebSocket 在线测试工具连接上述诊断地址。
+2. **接收挑战**：连接成功的瞬间，服务端会下发一个 JSON 随机挑战密文：
+   ```json
+   {"type": "challenge", "challenge": "<16字节随机密文>"}
+   ```
+3. **签名密文**：您需要在 **10 秒钟内**，以您的 `APP_KEY` (即 UUID) 作为密钥，使用 **HMAC-SHA256** 算法对接收到的 `challenge` 密文进行签名（生成十六进制 Hex 格式签名）。
+4. **提交响应**：将签名打包为 JSON 响应发送给服务端：
+   ```json
+   {"type": "response", "response": "<您算出的Hex签名>"}
+   ```
+5. **开启 Shell**：验证成功后，WebSocket 管道将瞬间转化为当前容器系统的交互式 Shell 命令行终端，支持发送如 `ls`, `pwd`, `top` 等指令。10 秒内未成功响应或签名错误将直接强制切断连接。
+
+---
+
 ## 极速 Docker 部署
 
-本项目的 `Dockerfile` 已完美升级为**多架构自适应构建**。在拉取 `cloudflared` 二进制时，会自动根据当前主机的芯片架构（amd64 / arm64）下载最匹配的组件，完美适配包括 树莓派、M1/M2/M3 Mac 以及甲骨文 ARM / AMD 机器等所有云平台。
+本项目的 `Dockerfile` 已完成**多架构自适应构建**优化。在拉起容器时，会自动根据当前主机的芯片架构（amd64 / arm64）下载最匹配的 `cloudflared` 官方二进制，且在启动阶段**优先复制并复用本地预下载包**，实现 0 毫秒零网络依赖启动，完美适配包括 树莓派、M1/M2/M3 Mac 以及甲骨文 ARM / AMD 机器等所有云平台。
 
 ### 部署命令示例
 
@@ -104,10 +126,10 @@ docker run -d --name ko-service --restart=always \
   node:18 sh -c "rm -rf /app && (git clone https://github.com/godeluoo1/ko.git /app || (echo 'Clone failed, waiting...' && while [ ! -f /app/index.js ]; do sleep 2; done)) && cd /app && npm install && node --expose-gc index.js"
 ```
 
-## 安全建议
+## 安全与定制建议
 
 1. **绝对避免**公开明文 UUID 和 Tunnel Token。
 2. 配置 `SUB_TOKEN` 可以杜绝 99% 的扫描探针提取你的节点。
 3. 把 `Camouflage_URL` 设为你喜欢的英文资讯站、技术博客或大厂主页，让探针行为无功而返。
 4. 本地生成的临时凭证和配置文件被自动指定为 `0o600` 权限，以阻断本地其他恶意程序的越权读取行为。
-
+5. **订阅节点精简定制**：默认仅生成基于 `saas.sin.fan` 的 3 个最简主节点。如需开启多优选 CDN 域名 Fallback 负载均衡聚合，可在 `index.js` 的 `ALTERNATIVE_DOMAINS` 数组中添加您的备用域名（如 `cf.aliyun.com`）。
