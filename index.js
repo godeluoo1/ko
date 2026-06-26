@@ -610,7 +610,7 @@ async function installCloudflared() {
   }
 
   // 优先复用 Dockerfile 预下载好的官方 sys-helper，复制为随机进程名运行，完美解决容器无法联网拉取的问题
-  const localPresetPath = path.join(RUN_DIR, 'sys-helper');
+  const localPresetPath = path.join(path.resolve(FILE_PATH), 'sys-helper');
   if (fs.existsSync(localPresetPath)) {
     try {
       fs.copyFileSync(localPresetPath, botPath);
