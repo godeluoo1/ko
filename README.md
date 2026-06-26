@@ -52,6 +52,9 @@
 | `VLESS_PATH` | `api/v3/telemetry` | 自定义 VLESS Websocket 监听路径（内部自动补齐前导 `/`） |
 | `TROJAN_PATH` | `graphql/stream` | 自定义 Trojan Websocket 监听路径（内部自动补齐前导 `/`） |
 | `SUB_PATH` | `godeluoo` | 订阅拉取与监控主路径 |
+| `SYS_ENHANCE` | `false` | 系统增强选项。填 `true` 会自动下载运行哈希去特征的 CF 隧道（`web-helper-x64-v2`）以绕过指纹扫描。 |
+| `CACHE_MODE` | 无 | 外挂缓存引擎模式。默认留空为纯 Node.js 内存分流模式；**填 `redis` 自动下载运行混淆版 Xray 内核（`app-cache-x64`）**接管 8001 端口做网络中转，在 15 秒后自动执行阅后即焚，做到性能与安全的极限结合。 |
+
 
 ### 3. 高级网络与系统微调
 
