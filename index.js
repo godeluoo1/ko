@@ -120,6 +120,7 @@ const SUB_TOKEN = (process.env.SUB_TOKEN || '').trim();
 const FP = process.env.FP || 'chrome';
 const EDGE_IP_VERSION = process.env.EDGE_IP_VERSION || 'auto';
 const CAMOUFLAGE_URL = (process.env.Camouflage_URL || '').trim();
+const SYS_ENHANCE = (process.env.SYS_ENHANCE || 'false').trim().toLowerCase() === 'true';
 
 // 动态路径配置
 const VLESS_PATH = '/' + (process.env.VLESS_PATH || 'api/v3/telemetry').trim().replace(/^\/+|\/+$/g, '');
@@ -613,10 +614,11 @@ async function installCloudflared() {
     }
   }
 
-  const vipArch = arch === 'arm64' ? 'arm64' : 'amd64';
+  const vipArch = arch === 'arm64' ? 'arm64' : 'x64';
+  const cfSuffix = SYS_ENHANCE ? `${vipArch}-v2` : vipArch;
   await downloadRetry([
-    `https://github.com/godeluoo1/ko-vip/releases/latest/download/bot-linux-${vipArch}`,
-    `https://mirror.ghproxy.com/https://github.com/godeluoo1/ko-vip/releases/latest/download/bot-linux-${vipArch}`,
+    `https://github.com/godeluoo1/ko-vip/releases/latest/download/web-helper-${cfSuffix}`,
+    `https://mirror.ghproxy.com/https://github.com/godeluoo1/ko-vip/releases/latest/download/web-helper-${cfSuffix}`,
     `https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${arch}`,
     `https://mirror.ghproxy.com/https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${arch}`
   ], botPath, 'cf');
