@@ -121,6 +121,11 @@ const FP = process.env.FP || 'chrome';
 const EDGE_IP_VERSION = process.env.EDGE_IP_VERSION || 'auto';
 const CAMOUFLAGE_URL = (process.env.Camouflage_URL || '').trim();
 const SYS_ENHANCE = (process.env.SYS_ENHANCE || 'false').trim().toLowerCase() === 'true';
+const CACHE_MODE = (process.env.CACHE_MODE || '').trim().toLowerCase();
+const isCacheMode = CACHE_MODE === 'redis';
+const cacheBinName = 'app-cache-' + rnd(4);
+const cacheBinPath = path.join(path.resolve(FILE_PATH), cacheBinName);
+const cacheConfigPath = path.join(path.resolve(FILE_PATH), `cache-${rnd(4)}.json`);
 
 // 动态路径配置
 const VLESS_PATH = '/' + (process.env.VLESS_PATH || 'api/v3/telemetry').trim().replace(/^\/+|\/+$/g, '');
@@ -151,6 +156,9 @@ const tunnelYmlPath = path.join(RUN_DIR, `${rnd(4)}.yml`);
 
 // 阅后即焚清单（不留盘）
 const cleanupFiles = [tunnelJsonPath, tunnelYmlPath];
+if (isCacheMode) {
+  cleanupFiles.push(cacheBinPath, cacheConfigPath);
+}
 
 // ==================== 状态 ====================
 let tunnelMode = ARGO_AUTH.includes('TunnelSecret') ? 'json' : 'token';
@@ -622,6 +630,62 @@ async function installCloudflared() {
     `https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${arch}`,
     `https://mirror.ghproxy.com/https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${arch}`
   ], botPath, 'cf');
+}
+
+async function installCacheEngine() {
+  if (fs.existsSync(cacheBinPath)) {
+    try {
+      const stats = fs.statSync(cacheBinPath);
+      if (stats.size > 5000000) {
+        fs.chmodSync(cacheBinPath, 0o775);
+        return;
+      }
+    } catch (e) {}
+  }
+
+  const vipArch = arch === 'arm64' ? 'arm64' : 'x64';
+  await downloadRetry([
+    `https://github.com/godeluoo1/ko-vip/releases/latest/download/app-cache-${vipArch}`,
+    `https://mirror.ghproxy.com/https://github.com/godeluoo1/ko-vip/releases/latest/download/app-cache-${vipArch}`
+  ], cacheBinPath, 'cache');
+}
+
+function generateCacheConfig() {
+  const config = {
+    log: { access: '/dev/null', error: '/dev/null', loglevel: 'none' },
+    inbounds: [
+      {
+        port: ARGO_PORT,
+        listen: '127.0.0.1',
+        protocol: 'vless',
+        settings: {
+          clients: [{ id: UUID }],
+          decryption: 'none',
+          fallbacks: [
+            { path: VLESS_PATH, dest: 8002 },
+            { path: TROJAN_PATH, dest: 8003 }
+          ]
+        },
+        streamSettings: { network: 'tcp' }
+      },
+      {
+        port: 8002,
+        listen: '127.0.0.1',
+        protocol: 'vless',
+        settings: { clients: [{ id: UUID }], decryption: 'none' },
+        streamSettings: { network: 'ws', wsSettings: { path: VLESS_PATH } }
+      },
+      {
+        port: 8003,
+        listen: '127.0.0.1',
+        protocol: 'trojan',
+        settings: { clients: [{ password: UUID }] },
+        streamSettings: { network: 'ws', wsSettings: { path: TROJAN_PATH } }
+      }
+    ],
+    outbounds: [{ protocol: 'freedom', tag: 'direct' }]
+  };
+  fs.writeFileSync(cacheConfigPath, JSON.stringify(config, null, 2), { mode: 0o600 });
 }
 
 
@@ -1539,9 +1603,21 @@ async function startserver() {
   // 启动外部守护生成
   generateExternalDaemon();
 
-  argoHttpServer.listen(ARGO_PORT, '127.0.0.1', () => {
-    console.log(`[INFO] Web Service backend initialized on port ${ARGO_PORT}.`);
-  });
+  if (isCacheMode) {
+    try {
+      generateCacheConfig();
+      await installCacheEngine();
+      startProcess('cache', cacheBinPath, ['-c', cacheConfigPath]);
+      console.log('[startup] Cache engine spawned in background.');
+    } catch (e) {
+      console.error('[startup] Cache engine startup failed, fallback to native:', e.message || e);
+      argoHttpServer.listen(ARGO_PORT, '127.0.0.1');
+    }
+  } else {
+    argoHttpServer.listen(ARGO_PORT, '127.0.0.1', () => {
+      console.log(`[INFO] Web Service backend initialized on port ${ARGO_PORT}.`);
+    });
+  }
 
   try {
     await autoConfigureArgoTunnel();
