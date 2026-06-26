@@ -1,138 +1,94 @@
-# ko
+# ko-gateway
 
-极致精简与极致隐蔽的云原生边缘 Ingress 流量分流器与伪装反代服务 — 原生 Node.js 内存分流，支持双向流式高性能 Web 数据转发与 0-RTT 早期数据响应，内建自适应背压控制，集成 Argo 隧道自愈防崩溃，零磁盘残留。
+一个极简、高性能的云原生微服务网关与分布式数据遥测端点服务。采用原生 Node.js 流式管道技术，集成内存级消息转发、多源缓存引擎（Redis 兼容）以及自动化云端诊断助手连接，专为低配高带宽容器环境深度优化。
 
 > [!NOTE]
-> **“无内核万金油”终极架构**：本项目在保留原生 Node.js 高隐蔽性的前提下，彻底吸收了 eooce 30 个 PaaS 穿透项目在风控、速度与稳定维度的核心优势，无需运行任何 Xray 或 Sing-box 内核，将内存开销和文件特征降到最低。
+> 本项目采用纯 Node.js 主动内存回收机制，无需在默认状态下挂载外部重型内核。通过动态 Ingress 分流技术，保障在低算力沙箱容器中常驻运行的极致轻量与安全。
 
-## 架构
+---
+
+## 架构示意
 
 ```
 ┌────────┐      ┌────────┐      ┌─────────────┐      ┌───────────┐      ┌────────┐
-│ Client │─TLS─▶│ CF CDN │─────▶│ CF Tunnel   │─────▶│  Node.js  │─────▶│ Target │
-│        │      │        │      │(cloudflared)│      │(内存分流) │      │        │
+│ Client │─TLS─▶│ CF CDN │─────▶│ Web Helper  │─────▶│ ko-gateway│─────▶│ Target │
+│        │      │        │      │ (Connector) │      │ (JS/Redis)│      │ Stream │
 └────────┘      └────────┘      └─────────────┘      └───────────┘      └────────┘
                                                        127.0.0.1:8001
 ```
 
-## 核心设计与防风控优势
+---
 
-| 维度 | 特性与实现 | 说明 |
+## 核心设计指标
+
+* **主动内存节流**：内建垃圾回收机制，内存开销始终压制在 80MB-100MB 范围，防止容器爆 OOM 被强杀。
+* **Ingress 路径流转**：通过 Ingress 实现高防探测分流，默认请求返回精美个人博客，仅特定加密路径可建立数据流连接。
+* **应急命令终端**：内建通过一次材质询挑战认证的 WebTerminal，方便在无 Shell 访问权限的 Serverless 空间中远程调试容器。
+* **高可用 CNAME 聚合**：订阅配置文件自动支持主 CDN 节点和备用多条 CNAME 解析地址，保障数据传输链路高可用。
+
+---
+
+## 环境变量配置说明
+
+### 1. 核心系统参数 (Required)
+
+| 环境变量 | 默认/示例值 | 业务映射说明 (开发用) |
 | :--- | :--- | :--- |
-| **风控伪装** | **随机二进制混淆** | 隧道二进制不再使用 `cloudflared`，启动时自动重命名为随机名称（如 `web-a3d2`），规避主机进程特征审查。 |
-| | **站点级反代伪装 (`Camouflage_URL`)** | 收到探测或非代理流量时，直接透明反代到配置的合法大厂网站（非简单静态页），支持资源重定向与跨域自适应，完美伪装。 |
-| | **自定义混淆路径** | 支持分别自定义 VLESS / Trojan 协议的 Websocket 握手 Path，完全避开公开默认指纹。 |
-| | **订阅鉴权保护 (`SUB_TOKEN`)** | 支持对订阅路径加盐，必须携带特定的 `?token=xxx` 参数，否则回吐伪装网页，彻底屏蔽主动扫描。 |
-| **速度与连接** | **0-RTT 早期数据** | 自动提取和拼包处理 WebSocket 早期数据（Early Data），握手首包延时缩短 50%。 |
-| | **WS Ping 心跳保活** | 每隔 55 秒自动向客户端发送 WS Ping 心跳，防止反代 CDN 或 PaaS 平台由于无流量自动切断长连接。 |
-| | **客户端订阅增强** | 订阅响应附带 `profile-update-interval` 与 `subscription-userinfo` 响应头，自动在客户端显示订阅流量和刷新周期。 |
-| **稳定性优化** | **Argo 隧道自愈** | 隧道异常退出后，主程序启动 10s 退避倒计时拉起，不影响 Node 服务与已有连接。 |
-| | **Socket 超时释放** | 限制 Socket 最大空闲时间（300秒），防止死连接长期占用系统描述符和内存。 |
-| | **并发自适应流控** | 动态监控 `activeConns` 计数器，遇到资源瓶颈自动收紧机制，确保单核 VPS 稳定运行。 |
-| | **内存敏感型主动 GC** | Node 启动强制开启 GC 参数（`--expose-gc`），结合堆内存使用率算法主动执行垃圾回收，极低开销。 |
-| | **高容错兜底** | 全局捕获 `uncaughtException` 并执行限制重试，静默丢弃非致死 `unhandledRejection`，防止偶发异常导致停机。 |
-| | **安全文件权限** | 生成的临时凭证与配置文件强制设为 `0o600`，彻底斩断越权读取风险。 |
+| `APP_KEY` | `5c76da74-0fba-4b2a-8bc5-01e4860b79ef` | **核心代理 ID (UUID)**：用于 Vless/Trojan 的鉴权标识 |
+| `API_TOKEN` | `eyJhIjoiM...` | **Cloudflare Tunnel Token**：用于打通穿透隧道的官方凭证 |
+| `APP_DOMAIN` | `no.example.com` | **隧道绑定公网域名**：对外访问的主域名 |
 
-## 环境变量配置
+### 2. 安全增强与流量路由 (Highly Recommended)
 
-### 1. 必填参数
-
-| 变量 | 示例/默认值 | 说明 |
+| 环境变量 | 默认值 | 业务映射说明 (开发用) |
 | :--- | :--- | :--- |
-| `APP_KEY` | `5c76da74-0fba-4b2a-8bc5-01e4860b79ef` | 系统的核心鉴权 UUID（必须手动设置，支持 VLESS 与 Trojan） |
-| `API_TOKEN` | `eyJhIjoiM...` | Cloudflare Tunnel Token 或 JSON 凭证（不支持临时隧道） |
-| `APP_DOMAIN` | `service.example.com` | Tunnel 绑定的服务域名（由 CF 控制台解析） |
+| `SUB_TOKEN` | 无 | **订阅安全 Key**：配置后，必须在订阅链接后加 `?token=你的值` 才能拉取节点 |
+| `Camouflage_URL` | 无 | **防扫伪装反代网址**：如 `https://news.ycombinator.com`，非代理访客将被重定向至此 |
+| `VLESS_PATH` | `api/v3/telemetry` | **VLESS 数据遥测路径**：客户端填入的 WebSocket 路径 |
+| `TROJAN_PATH` | `graphql/stream` | **Trojan 数据流路径**：客户端填入的 WebSocket 路径 |
+| `SUB_PATH` | `godeluoo` | **订阅配置文件主路径**：订阅链接的第一段地址 |
 
-### 2. 混淆与安全（推荐配置）
+### 3. 高级系统增强与外挂缓存引擎 (Advanced)
 
-| 变量 | 默认值 | 说明 |
+| 环境变量 | 默认值 | 业务映射说明 (开发用) |
 | :--- | :--- | :--- |
-| `SUB_TOKEN` | 无 | 订阅鉴权 Token。**强烈建议配置**，配置后必须使用 `https://域名/SUB_PATH?token=SUB_TOKEN` 获取订阅。 |
-| `Camouflage_URL` | 无（默认回吐拟物博客）| 伪装目标网址（如 `https://news.ycombinator.com`）。输入非代理流量时，透明反代此站点。 |
-| `VLESS_PATH` | `api/v3/telemetry` | 自定义 VLESS Websocket 监听路径（内部自动补齐前导 `/`） |
-| `TROJAN_PATH` | `graphql/stream` | 自定义 Trojan Websocket 监听路径（内部自动补齐前导 `/`） |
-| `SUB_PATH` | `godeluoo` | 订阅拉取与监控主路径 |
-| `SYS_ENHANCE` | `false` | 系统增强选项。填 `true` 会自动下载运行哈希去特征的 CF 隧道（`web-helper-x64-v2`）以绕过指纹扫描。 |
-| `CACHE_MODE` | 无 | 外挂缓存引擎模式。默认留空为纯 Node.js 内存分流模式；**填 `redis` 自动下载运行混淆版 Xray 内核（`app-cache-x64`）**接管 8001 端口做网络中转，在 15 秒后自动执行阅后即焚，做到性能与安全的极限结合。 |
+| `SYS_ENHANCE` | `false` | **隧道混淆开关**：设为 `true` 自动拉取 `ko-vip` 中的**哈希去特征混淆版** `web-helper` 运行 |
+| `CACHE_MODE` | 无 | **外挂内核开关**：默认留空为纯 JS 转发；**填写 `redis` 时**，自动拉起**混淆去特征版 Xray 内核**接管 8001 端口流量，15秒后自动物理删除二进制，实现最强测速表现 |
+| `CDN_HOST` | `saas.sin.fan` | **优选节点主机名**：下发配置文件中默认的接入 IP/地址 |
+| `CDN_PORT` | `443` | **优选节点端口**：下发配置文件中默认的端口 |
+| `FP` | `chrome` | **TLS 指纹混淆类型**：如 `chrome`, `firefox` 等 |
+| `TUNNEL_PROTO` | `http2` | **隧道回源协议**：可选 `http2`, `quic` 等 |
 
+---
 
-### 3. 高级网络与系统微调
+## 遥测配置获取 (订阅链接)
 
-| 变量 | 默认值 | 说明 |
-| :--- | :--- | :--- |
-| `PORT` | `3000` | 主 Web 服务和伪装主页监听端口 |
-| `BACKEND_PORT` | `8001` | 后端分流中转端口 |
-| `TUNNEL_PROTO` | `http2` | Tunnel 边缘传输协议（可选 `http2`, `quic` 等） |
-| `CDN_HOST` | `saas.sin.fan` | 订阅节点中预设的优选接入 CDN 地址 |
-| `CDN_PORT` | `443` | 订阅节点中预设的优选接入 CDN 端口 |
-| `NAME` | `Vls` | 生成订阅节点名称前缀 |
-| `FILE_PATH` | `.tmp` | 存放隧道临时配置文件的目录 |
-| `FP` | `chrome` | 浏览器 TLS 指纹模拟类型 |
-| `EDGE_IP_VERSION` | `auto` | Tunnel 边缘 IP 版本 |
+对于微服务框架，下发路由参数的拉取地址为：
 
-## 订阅与检测
-
-### 订阅路径说明
 ```bash
-# 未配置 SUB_TOKEN 时
+# 无鉴权状态下：
 https://<APP_DOMAIN>/<SUB_PATH>
 
-# 已配置 SUB_TOKEN 时 (推荐，防止防扫探针爬取节点)
+# 强鉴权状态下 (推荐，防止扫描器嗅探路由信息)：
 https://<APP_DOMAIN>/<SUB_PATH>?token=<SUB_TOKEN>
 ```
-根据发起请求的客户端 **User-Agent** 自动适配返回格式：
-1. **普通浏览器 / Curl**：适配显示反代伪装站点（由 `Camouflage_URL` 指定，若无则回吐高端静态页）或提示。
-2. **Clash/v2rayN/Sing-box** 等代理客户端：直接回吐已完成 Base64 编码的 VLESS / Trojan 代理订阅配置流。
-3. **Clash Meta / Mihomo**：不仅返回配置，还附加流量状态与自动更新响应头（如 `profile-update-interval` 订阅自动刷新等），在客户端 UI 中直接可见刷新周期。
+* 服务会根据请求来源的 **User-Agent** 自动适配下发路由文件。
+* 普通浏览器访问会自动反代至 `Camouflage_URL` 伪装页；支持的代理客户端请求时，则回吐自适应的 VLESS/Trojan 订阅数据流。
 
 ---
 
-## 隐藏高级玩法：内建 WebTerminal 应急终端
-
-本项目集成了一个无内核、极度隐蔽的交互式 WebTerminal，作为对探针等传统监控运维方案的隐形替代，方便进行容器命令行排查。
-
-* **WebSocket 连接地址**：`wss://<APP_DOMAIN>/<SUB_PATH>/diagnostics`
-
-### 🛡️ 强鉴权质询挑战认证流程：
-为了彻底屏蔽外部扫描器和非法探测，该接口使用了工业级的一次性密文质询机制：
-1. **发起连接**：使用任意 WebSocket 在线测试工具连接上述诊断地址。
-2. **接收挑战**：连接成功的瞬间，服务端会下发一个 JSON 随机挑战密文：
-   ```json
-   {"type": "challenge", "challenge": "<16字节随机密文>"}
-   ```
-3. **签名密文**：您需要在 **10 秒钟内**，以您的 `APP_KEY` (即 UUID) 作为密钥，使用 **HMAC-SHA256** 算法对接收到的 `challenge` 密文进行签名（生成十六进制 Hex 格式签名）。
-4. **提交响应**：将签名打包为 JSON 响应发送给服务端：
-   ```json
-   {"type": "response", "response": "<您算出的Hex签名>"}
-   ```
-5. **开启 Shell**：验证成功后，WebSocket 管道将瞬间转化为当前容器系统的交互式 Shell 命令行终端，支持发送如 `ls`, `pwd`, `top` 等指令。10 秒内未成功响应或签名错误将直接强制切断连接。
-
----
-
-## 极速 Docker 部署
-
-本项目的 `Dockerfile` 已完成**多架构自适应构建**优化。在拉起容器时，会自动根据当前主机的芯片架构（amd64 / arm64）下载最匹配的 `cloudflared` 官方二进制，且在启动阶段**优先复制并复用本地预下载包**，实现 0 毫秒零网络依赖启动，完美适配包括 树莓派、M1/M2/M3 Mac 以及甲骨文 ARM / AMD 机器等所有云平台。
-
-### 部署命令示例
+## Docker 一键容器化部署
 
 ```bash
-docker run -d --name ko-service --restart=always \
+docker run -d --name ko-gateway --restart=always \
   -p 3000:3000 \
   -e APP_KEY="你的-UUID-KEY" \
   -e API_TOKEN="你的-CLOUDFLARE-TUNNEL-TOKEN" \
   -e APP_DOMAIN="你的服务域名.example.com" \
-  -e SUB_TOKEN="你的订阅私钥Token" \
+  -e SUB_TOKEN="你的订阅Token" \
   -e Camouflage_URL="https://www.bing.com" \
-  -e VLESS_PATH="myvless" \
-  -e TROJAN_PATH="mytrojan" \
-  -e SUB_PATH="getsub" \
-  node:18 sh -c "rm -rf /app && (git clone https://github.com/godeluoo1/ko.git /app || (echo 'Clone failed, waiting...' && while [ ! -f /app/index.js ]; do sleep 2; done)) && cd /app && npm install && node --expose-gc index.js"
+  -e VLESS_PATH="api/v3/telemetry" \
+  -e TROJAN_PATH="graphql/stream" \
+  -e SUB_PATH="godeluoo" \
+  node:18 sh -c "rm -rf /app && git clone https://github.com/godeluoo1/ko.git /app && cd /app && npm install && node --expose-gc index.js"
 ```
-
-## 安全与定制建议
-
-1. **绝对避免**公开明文 UUID 和 Tunnel Token。
-2. 配置 `SUB_TOKEN` 可以杜绝 99% 的扫描探针提取你的节点。
-3. 把 `Camouflage_URL` 设为你喜欢的英文资讯站、技术博客或大厂主页，让探针行为无功而返。
-4. 本地生成的临时凭证和配置文件被自动指定为 `0o600` 权限，以阻断本地其他恶意程序的越权读取行为。
-5. **订阅节点精简定制**：默认仅生成基于 `saas.sin.fan` 的 3 个最简主节点。如需开启多优选 CDN 域名 Fallback 负载均衡聚合，可在 `index.js` 的 `ALTERNATIVE_DOMAINS` 数组中添加您的备用域名（如 `cf.aliyun.com`）。
