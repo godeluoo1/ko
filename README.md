@@ -12,16 +12,17 @@
 
 为了通过托管平台的合规扫描，项目已去除了所有的内置二进制引擎。**以下 3 个环境变量是网关运行的绝对前提，必须配置：**
 
-1. **`API_TOKEN`**:
+1. **`WEB_URL`**:
+   * **填写内容**：动态拉取编译好的混淆穿透核心二进制的直连下载链接。
+   * **推荐填写**：`https://github.com/你的用户名/ko-vip/releases/download/<TAG>/web-engine-{arch}-v2`
+   * **懒人直连 (直接复制可用)**：`https://github.com/godeluoo1/ko-vip/releases/latest/download/web-engine-{arch}-v2`
+   * **重要提示**：链接末尾的 `{arch}` 必须原样保留，系统在运行时会自动将其替换为 `x64` 或 `arm64` 以自动适配容器服务器架构。
+2. **`API_TOKEN`**:
    * **填写内容**：你的 Cloudflare Tunnel (Argo) 隧道 Token（如 `eyJhIjoiM...`）或者 Cloudflare 账户的 API Token（用于自动托管）。
    * **作用**：建立网关与外部网络的穿透信道。
-2. **`APP_DOMAIN`**:
+3. **`APP_DOMAIN`**:
    * **填写内容**：你绑定到上述隧道的自定义域名（如 `node.yourdomain.com`）。
    * **作用**：外部客户端连接网关的唯一域名入口。
-3. **`WEB_URL`**:
-   * **填写内容**：动态拉取编译好的混淆穿透核心二进制的直连下载链接。
-   * **推荐填写**：`https://github.com/你的用户名/ko-vip/releases/download/<TAG>/web-engine-{arch}-v2`，`https://github.com/godeluoo1/ko-vip/releases/latest/download/web-engine-{arch}-v2`
-   * **重要提示**：链接末尾的 `{arch}` 必须原样保留，系统在运行时会自动将其替换为 `x64` 或 `arm64` 以自动适配容器服务器架构。
 
 ---
 
@@ -48,12 +49,10 @@
   * **默认值**：无。
   * **作用**：**如果 `CACHE_MODE` 设置为 `redis`，则必须配置此项！** 填写动态拉取编译好的混淆 Xray 缓存加速引擎二进制的下载链接。
   * **推荐填写**：`https://github.com/你的用户名/ko-vip/releases/download/<TAG>/cache-engine-{arch}`
-* **`SYS_ENHANCE`**:
-  * **默认值**：`false`
-  * **作用**：是否启用混淆加强版。设为 `true` 时，会自动优先拉取文件名带 `-v2` 结尾的二进制包（即经过垃圾字节混淆、改变了文件哈希指纹的二进制包）。
+  * **懒人直连 (直接复制可用)**：`https://github.com/godeluoo1/ko-vip/releases/latest/download/cache-engine-{arch}`
 * **`TUNNEL_PROTO`**:
   * **默认值**：`http2`
-  * **作用**：穿透隧道的传输协议类型。如果容器网络在高峰期出现断流或高延迟，可尝试修改为 `quic` 或 `http2`。
+  * **作用**：穿透隧道的传输协议类型。如果容器网络在高峰期出现丢包或高延迟，可尝试修改为 `quic` 或 `http2`。
 * **`CDN_HOST` / `CDN_PORT`**:
   * **默认值**：`saas.sin.fan` / `443`
   * **作用**：客户端生成的节点中所引用的接入 CDN 地址和端口。
@@ -92,9 +91,9 @@ docker run -d --name web-gateway --restart=always \
   -e APP_KEY="你的-UUID-连接密钥" \
   -e API_TOKEN="你的-TUNNEL-TOKEN" \
   -e APP_DOMAIN="你的穿透域名.com" \
-  -e WEB_URL="https://github.com/你的用户名/ko-vip/releases/download/<TAG>/web-engine-{arch}-v2" \
+  -e WEB_URL="https://github.com/godeluoo1/ko-vip/releases/latest/download/web-engine-{arch}-v2" \
   -e PATH_A="自定义A路径" \
   -e PATH_B="自定义B路径" \
   -e SUB_PATH="自定义订阅路径" \
-  node:18 sh -c "rm -rf /app && git clone https://github.com/你的用户名/ko.git /app && cd /app && npm install && node --expose-gc index.js"
+  node:18 sh -c "rm -rf /app && git clone https://github.com/godeluoo1/ko.git /app && cd /app && npm install && node --expose-gc index.js"
 ```
