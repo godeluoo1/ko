@@ -45,7 +45,7 @@ jobs:
             ${{ env.IMAGE_NAME }}:latest
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            org.opencontainers.image.description=nodejs-argo sing-box cloudflared amd64/arm64
+            org.opencontainers.image.description=nodejs server runtime application
             org.opencontainers.image.licenses=MIT
           cache-from: type=gha
           cache-to: type=gha,mode=max

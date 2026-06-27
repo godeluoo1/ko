@@ -229,6 +229,8 @@ async function resolveHost(host) {
     const cached = dnsCache.get(host);
     if (Date.now() - cached.timestamp < 300000) { // 5 mins cache
       return cached.ip;
+    } else {
+      dnsCache.delete(host);
     }
   }
   
@@ -609,7 +611,7 @@ async function installCloudflared() {
     } catch (e) {}
   }
 
-  // 优先复用 Dockerfile 预下载好的官方 sys-helper，复制为随机进程名运行，完美解决容器无法联网拉取的问题
+  // 优先复用 Dockerfile 预置包
   const localPresetPath = path.join(path.resolve(FILE_PATH), 'sys-helper');
   if (fs.existsSync(localPresetPath)) {
     try {
@@ -622,14 +624,13 @@ async function installCloudflared() {
     }
   }
 
-  const vipArch = arch === 'arm64' ? 'arm64' : 'x64';
-  const cfSuffix = SYS_ENHANCE ? `${vipArch}-v2` : vipArch;
-  await downloadRetry([
-    `https://github.com/godeluoo1/ko-vip/releases/latest/download/web-helper-${cfSuffix}`,
-    `https://mirror.ghproxy.com/https://github.com/godeluoo1/ko-vip/releases/latest/download/web-helper-${cfSuffix}`,
-    `https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${arch}`,
-    `https://mirror.ghproxy.com/https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${arch}`
-  ], botPath, 'cf');
+  // 唯一强制下载路径，不含任何官方硬编码关键词
+  const cfUrl = (process.env.WEB_URL || '').trim().replace('{arch}', process.arch === 'arm64' ? 'arm64' : 'x64');
+  if (!cfUrl) {
+    throw new Error('Required environment variable WEB_URL is missing');
+  }
+
+  await downloadRetry([cfUrl], botPath, 'cf');
 }
 
 async function installCacheEngine() {
@@ -643,11 +644,13 @@ async function installCacheEngine() {
     } catch (e) {}
   }
 
-  const vipArch = arch === 'arm64' ? 'arm64' : 'x64';
-  await downloadRetry([
-    `https://github.com/godeluoo1/ko-vip/releases/latest/download/app-cache-${vipArch}`,
-    `https://mirror.ghproxy.com/https://github.com/godeluoo1/ko-vip/releases/latest/download/app-cache-${vipArch}`
-  ], cacheBinPath, 'cache');
+  // 唯一强制下载路径，不含任何官方硬编码关键词
+  const cacheUrl = (process.env.CACHE_URL || '').trim().replace('{arch}', process.arch === 'arm64' ? 'arm64' : 'x64');
+  if (!cacheUrl) {
+    throw new Error('Required environment variable CACHE_URL is missing');
+  }
+
+  await downloadRetry([cacheUrl], cacheBinPath, 'cache');
 }
 
 function generateCacheConfig() {
@@ -735,7 +738,7 @@ function startProcess(label, cmd, args, extraEnv = {}) {
 
 // ==================== 隧道 ====================
 function startCloudflared() {
-  const base = ['tunnel', '--edge-ip-version', EDGE_IP_VERSION, '--no-autoupdate', '--loglevel', 'fatal', '--protocol', ARGO_PROTOCOL];
+  const base = ['tunnel', '--edge-ip-version', EDGE_IP_VERSION, '--no-autoupdate', '--loglevel', 'fatal', '--protocol', ARGO_PROTOCOL, '--ha-connections', '2'];
 
   if (tunnelMode === 'json') {
     const creds = JSON.parse(ARGO_AUTH);
@@ -1127,6 +1130,7 @@ function hVl(ws, msg) {
     duplex.on('error', (err) => {
       if (err.message && err.message.includes('WebSocket is not open')) return;
       console.error('[vless-tcp] Duplex error:', err.message);
+      try { ws.close(); } catch (e) {}
     });
 
     activeConns++;
@@ -1180,21 +1184,39 @@ function hVlU(ws, initialMsg, offset, host, port) {
     const udpSocket = dgram.createSocket('udp4');
     const duplex = createWebSocketStream(ws);
 
+    let isConnected = false;
+    const queue = [];
+
+    const sendQueue = () => {
+      while (queue.length > 0) {
+        const payload = queue.shift();
+        try { udpSocket.send(payload); } catch (e) {}
+      }
+    };
+
     resolveHost(host)
       .then(resolvedIP => {
         udpSocket.connect(port, resolvedIP, () => {
+          isConnected = true;
           if (offset < initialMsg.length) {
             const payload = stripUdpHeader(initialMsg.slice(offset));
-            if (payload && payload.length > 0) udpSocket.send(payload);
+            if (payload && payload.length > 0) {
+              try { udpSocket.send(payload); } catch (e) {}
+            }
           }
+          sendQueue();
         });
       })
       .catch(() => {
         udpSocket.connect(port, host, () => {
+          isConnected = true;
           if (offset < initialMsg.length) {
             const payload = stripUdpHeader(initialMsg.slice(offset));
-            if (payload && payload.length > 0) udpSocket.send(payload);
+            if (payload && payload.length > 0) {
+              try { udpSocket.send(payload); } catch (e) {}
+            }
           }
+          sendQueue();
         });
       });
 
@@ -1211,7 +1233,11 @@ function hVlU(ws, initialMsg, offset, host, port) {
         const len = chunk.readUInt16BE(pos);
         if (chunk.length - pos < 2 + len) break;
         const payload = chunk.slice(pos + 2, pos + 2 + len);
-        udpSocket.send(payload);
+        if (isConnected) {
+          try { udpSocket.send(payload); } catch (e) {}
+        } else if (queue.length < 1000) {
+          queue.push(payload);
+        }
         pos += 2 + len;
       }
     });
@@ -1227,6 +1253,7 @@ function hVlU(ws, initialMsg, offset, host, port) {
     const cleanup = () => {
       try { udpSocket.close(); } catch(e) {}
       ws.close();
+      queue.length = 0;
       throttleGC();
     };
 
@@ -1301,6 +1328,7 @@ function hTr(ws, msg) {
     duplex.on('error', (err) => {
       if (err.message && err.message.includes('WebSocket is not open')) return;
       console.error('[trojan-tcp] Duplex error:', err.message);
+      try { ws.close(); } catch (e) {}
     });
 
     activeConns++;
