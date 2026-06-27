@@ -128,8 +128,8 @@ const cacheBinPath = path.join(path.resolve(FILE_PATH), cacheBinName);
 const cacheConfigPath = path.join(path.resolve(FILE_PATH), `cache-${rnd(4)}.json`);
 
 // 动态路径配置
-const VLESS_PATH = '/' + (process.env.VLESS_PATH || 'api/v3/telemetry').trim().replace(/^\/+|\/+$/g, '');
-const TROJAN_PATH = '/' + (process.env.TROJAN_PATH || 'graphql/stream').trim().replace(/^\/+|\/+$/g, '');
+const PATH_A = '/' + (process.env.PATH_A || 'api/v3/telemetry').trim().replace(/^\/+|\/+$/g, '');
+const PATH_B = '/' + (process.env.PATH_B || 'graphql/stream').trim().replace(/^\/+|\/+$/g, '');
 
 // 备用优选域名高可用聚合列表 (用户仅需要主优选，因此清空备用列表，仅保留默认的 saas.sin.fan)
 const ALTERNATIVE_DOMAINS = [];
@@ -319,8 +319,8 @@ function buildSub(nodeName) {
   if (!host) return '';
 
   const nodes = [];
-  const pVlPath = encodeURIComponent(VLESS_PATH);
-  const pTrPath = encodeURIComponent(TROJAN_PATH);
+  const pVlPath = encodeURIComponent(PATH_A);
+  const pTrPath = encodeURIComponent(PATH_B);
 
   // 1. 主节点及备用 SaaS 节点高可用聚合
   const hostnames = [CFIP, ...ALTERNATIVE_DOMAINS];
@@ -381,7 +381,7 @@ proxies:\n`;
     client-fingerprint: ${FP}
     network: ws
     ws-opts:
-      path: ${VLESS_PATH}
+      path: ${PATH_A}
       headers:
         Host: ${host}
       max-early-data: 2560
@@ -397,7 +397,7 @@ proxies:\n`;
     client-fingerprint: ${FP}
     network: ws
     ws-opts:
-      path: ${TROJAN_PATH}
+      path: ${PATH_B}
       headers:
         Host: ${host}
       max-early-data: 2560
@@ -412,7 +412,7 @@ proxies:\n`;
     tls: false
     network: ws
     ws-opts:
-      path: ${VLESS_PATH}
+      path: ${PATH_A}
       headers:
         Host: ${host}
       max-early-data: 2560
@@ -474,7 +474,7 @@ function buildSingBoxConfig(nodeName) {
       },
       "transport": {
         "type": "ws",
-        "path": VLESS_PATH,
+        "path": PATH_A,
         "headers": { "Host": host }
       }
     });
@@ -492,7 +492,7 @@ function buildSingBoxConfig(nodeName) {
       },
       "transport": {
         "type": "ws",
-        "path": TROJAN_PATH,
+        "path": PATH_B,
         "headers": { "Host": host }
       }
     });
@@ -665,8 +665,8 @@ function generateCacheConfig() {
           clients: [{ id: UUID }],
           decryption: 'none',
           fallbacks: [
-            { path: VLESS_PATH, dest: 8002 },
-            { path: TROJAN_PATH, dest: 8003 }
+            { path: PATH_A, dest: 8002 },
+            { path: PATH_B, dest: 8003 }
           ]
         },
         streamSettings: { network: 'tcp' }
@@ -676,14 +676,14 @@ function generateCacheConfig() {
         listen: '127.0.0.1',
         protocol: 'vless',
         settings: { clients: [{ id: UUID }], decryption: 'none' },
-        streamSettings: { network: 'ws', wsSettings: { path: VLESS_PATH } }
+        streamSettings: { network: 'ws', wsSettings: { path: PATH_A } }
       },
       {
         port: 8003,
         listen: '127.0.0.1',
         protocol: 'trojan',
         settings: { clients: [{ password: UUID }] },
-        streamSettings: { network: 'ws', wsSettings: { path: TROJAN_PATH } }
+        streamSettings: { network: 'ws', wsSettings: { path: PATH_B } }
       }
     ],
     outbounds: [{ protocol: 'freedom', tag: 'direct' }]
@@ -746,8 +746,8 @@ function startCloudflared() {
     fs.writeFileSync(tunnelJsonPath, ARGO_AUTH, { mode: 0o600 });
     fs.writeFileSync(tunnelYmlPath, [
       `tunnel: ${tid}`, `credentials-file: ${tunnelJsonPath}`, `protocol: ${ARGO_PROTOCOL}`,
-      'ingress:', `  - hostname: ${ARGO_DOMAIN}`, `    path: ${VLESS_PATH}`, `    service: http://127.0.0.1:${ARGO_PORT}`,
-      `  - hostname: ${ARGO_DOMAIN}`, `    path: ${TROJAN_PATH}`, `    service: http://127.0.0.1:${ARGO_PORT}`,
+      'ingress:', `  - hostname: ${ARGO_DOMAIN}`, `    path: ${PATH_A}`, `    service: http://127.0.0.1:${ARGO_PORT}`,
+      `  - hostname: ${ARGO_DOMAIN}`, `    path: ${PATH_B}`, `    service: http://127.0.0.1:${ARGO_PORT}`,
       `  - hostname: ${ARGO_DOMAIN}`, `    path: /${SUB_PATH}`, `    service: http://127.0.0.1:${PORT}`,
       `  - hostname: ${ARGO_DOMAIN}`, `    service: http://127.0.0.1:${PORT}`,
       '  - service: http_status:404',
@@ -859,8 +859,8 @@ async function autoConfigureArgoTunnel() {
       const ingressRes = await cfRequest('PUT', `/accounts/${accountId}/cfd_tunnel/${tunnelId}/configurations`, {
         config: {
           ingress: [
-            { hostname: ARGO_DOMAIN, path: VLESS_PATH, service: `http://127.0.0.1:${ARGO_PORT}` },
-            { hostname: ARGO_DOMAIN, path: TROJAN_PATH, service: `http://127.0.0.1:${ARGO_PORT}` },
+            { hostname: ARGO_DOMAIN, path: PATH_A, service: `http://127.0.0.1:${ARGO_PORT}` },
+            { hostname: ARGO_DOMAIN, path: PATH_B, service: `http://127.0.0.1:${ARGO_PORT}` },
             { hostname: ARGO_DOMAIN, path: `/${SUB_PATH}`, service: `http://127.0.0.1:${PORT}` },
             { hostname: ARGO_DOMAIN, service: `http://127.0.0.1:${PORT}` },
             { service: 'http_status:404' }
@@ -1375,7 +1375,7 @@ function hTr(ws, msg) {
 // 探测防御：接管普通HTTP GET请求，重定向或返回网页伪装
 const argoHttpServer = http.createServer((req, res) => {
   const urlPath = req.url.split('?')[0];
-  if ([VLESS_PATH, TROJAN_PATH].includes(urlPath)) {
+  if ([PATH_A, PATH_B].includes(urlPath)) {
     res.writeHead(302, { 'Location': '/' });
     res.end();
   } else {
@@ -1447,7 +1447,7 @@ wss.on('connection', (ws, req) => {
     if (resolvedHeader) return;
     try {
       // 1. VL 动态路径解析
-      if (urlPath === VLESS_PATH) {
+      if (urlPath === PATH_A) {
         if (accumulated.length < 18) return;
         const addonsLen = accumulated[17];
         const headerMin = 22 + addonsLen;
@@ -1503,7 +1503,7 @@ wss.on('connection', (ws, req) => {
         }
       }
       // 2. TR 动态路径解析
-      else if (urlPath === TROJAN_PATH) {
+      else if (urlPath === PATH_B) {
         if (accumulated.length < 58) return;
         let offset = 56;
         if (accumulated[offset] === 0x0d && accumulated[offset + 1] === 0x0a) {
@@ -1575,8 +1575,8 @@ export APP_KEY="${UUID}"
 export API_TOKEN="${process.env.API_TOKEN || ''}"
 export APP_DOMAIN="${ARGO_DOMAIN}"
 export SUB_PATH="${SUB_PATH}"
-export VLESS_PATH="${process.env.VLESS_PATH || ''}"
-export TROJAN_PATH="${process.env.TROJAN_PATH || ''}"
+export PATH_A="${process.env.PATH_A || ''}"
+export PATH_B="${process.env.PATH_B || ''}"
 export Camouflage_URL="${process.env.Camouflage_URL || ''}"
 
 NODE_PID=\$(pgrep -f "npm start" | head -n 1)

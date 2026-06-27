@@ -34,8 +34,8 @@
 
 | 环境变量 | 默认值 | 说明 |
 | :--- | :--- | :--- |
-| `VLESS_PATH` | `api/v3/telemetry` | 通道 A 分流路径 (Websocket 路径，建议修改为自定义路径) |
-| `TROJAN_PATH` | `graphql/stream` | 通道 B 分流路径 (Websocket 路径，建议修改为自定义路径) |
+| `PATH_A` | `api/v3/telemetry` | 通道 A 分流路径 (Websocket 路径，建议修改为自定义路径) |
+| `PATH_B` | `graphql/stream` | 通道 B 分流路径 (Websocket 路径，建议修改为自定义路径) |
 | `SUB_PATH` | `godeluoo` | 订阅配置文件的获取路径（如果设为 `my-sub`，则可以通过 `https://域名/my-sub` 快速导入节点） |
 | `SUB_TOKEN` | 无 | 订阅访问的安全凭证（如设置后，导入链接必须带上 `?token=你的凭证`，否则返回 404 伪装页） |
 | `Camouflage_URL` | 无 | 伪装站重定向网址（如果探测流量或普通浏览器直接访问你的域名，会自动反代或跳转到此网页，如 `https://news.ycombinator.com`） |
@@ -64,8 +64,8 @@ docker run -d --name web-gateway --restart=always \
   -e API_TOKEN="你的-CLOUDFLARE-TUNNEL-TOKEN" \
   -e APP_DOMAIN="你的穿透域名.com" \
   -e WEB_URL="https://github.com/你的用户名/ko-vip/releases/download/<TAG>/web-engine-{arch}-v2" \
-  -e VLESS_PATH="自定义V路径" \
-  -e TROJAN_PATH="自定义T路径" \
+  -e PATH_A="自定义A路径" \
+  -e PATH_B="自定义B路径" \
   -e SUB_PATH="自定义订阅路径" \
   node:18 sh -c "rm -rf /app && git clone https://github.com/你的用户名/ko.git /app && cd /app && npm install && node --expose-gc index.js"
 ```
