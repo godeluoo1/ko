@@ -561,12 +561,25 @@ async function refreshSubSync() {
 // ==================== 下载 ====================
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
-function download(url, dest) {
+function download(url, dest, redirectCount = 0) {
+  if (redirectCount > 5) {
+    return Promise.reject(new Error('Too many redirects'));
+  }
   return new Promise((resolve, reject) => {
     const tmp = `${dest}.dl`;
     try { fs.rmSync(tmp, { force: true }); } catch (e) {}
     const client = url.startsWith('https') ? https : http;
     const req = client.get(url, { headers: { 'User-Agent': UA }, timeout: 120000 }, (res) => {
+      // Handle HTTP redirects (301, 302, 307, 308)
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        let redirectUrl = res.headers.location;
+        if (!redirectUrl.startsWith('http')) {
+          const parsedUrl = new URL(url);
+          redirectUrl = `${parsedUrl.protocol}//${parsedUrl.host}${redirectUrl}`;
+        }
+        return download(redirectUrl, dest, redirectCount + 1).then(resolve).catch(reject);
+      }
+
       if (res.statusCode < 200 || res.statusCode >= 300) {
         return reject(new Error(`Status Code: ${res.statusCode}`));
       }
