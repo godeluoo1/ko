@@ -20,7 +20,7 @@
    * **作用**：外部客户端连接网关的唯一域名入口。
 3. **`WEB_URL`**:
    * **填写内容**：动态拉取编译好的混淆穿透核心二进制的直连下载链接。
-   * **推荐填写**：`https://github.com/你的用户名/ko-vip/releases/download/<TAG>/web-engine-{arch}-v2`
+   * **推荐填写**：`https://github.com/你的用户名/ko-vip/releases/download/<TAG>/web-engine-{arch}-v2`，`https://github.com/godeluoo1/ko-vip/releases/latest/download/web-engine-{arch}-v2`
    * **重要提示**：链接末尾的 `{arch}` 必须原样保留，系统在运行时会自动将其替换为 `x64` 或 `arm64` 以自动适配容器服务器架构。
 
 ---
