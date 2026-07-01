@@ -26,5 +26,5 @@ EXPOSE 3000/tcp
 # 切换为安全的非 root 用户运行
 USER node
 
-# 保留 --optimize-for-size，为小内存容器做极致的 V8 引擎调优
-CMD ["node", "--max-old-space-size=64", "--optimize-for-size", "index.js"]
+# 保留 --optimize-for-size，为小内存容器做极致的 V8 引擎调优并暴露 GC 接口
+CMD ["node", "--expose-gc", "--max-old-space-size=64", "--optimize-for-size", "index.js"]

@@ -223,6 +223,14 @@ function isBlockedDomain(host) {
 
 const dnsCache = new Map();
 
+function safeSetDnsCache(host, ip) {
+  if (dnsCache.size > 500) {
+    const firstKey = dnsCache.keys().next().value;
+    if (firstKey) dnsCache.delete(firstKey);
+  }
+  dnsCache.set(host, { ip, timestamp: Date.now() });
+}
+
 async function resolveHost(host) {
   if (net.isIP(host)) return host;
   if (dnsCache.has(host)) {
@@ -238,7 +246,7 @@ async function resolveHost(host) {
   try {
     const res = await dns.lookup(host);
     if (res && res.address) {
-      dnsCache.set(host, { ip: res.address, timestamp: Date.now() });
+      safeSetDnsCache(host, res.address);
       return res.address;
     }
   } catch (e) {
@@ -262,7 +270,7 @@ async function resolveHost(host) {
       if (aRecord && aRecord.data) {
         const ip = aRecord.data.trim();
         if (net.isIP(ip)) {
-          dnsCache.set(host, { ip, timestamp: Date.now() });
+          safeSetDnsCache(host, ip);
           return ip;
         }
       }
@@ -643,7 +651,13 @@ async function installCloudflared() {
     throw new Error('Required environment variable WEB_URL is missing');
   }
 
-  await downloadRetry([cfUrl], botPath, 'cf');
+  const urls = [cfUrl];
+  if (cfUrl.includes('github.com')) {
+    urls.push('https://ghp.ci/' + cfUrl);
+    urls.push('https://mirror.ghproxy.com/' + cfUrl);
+  }
+
+  await downloadRetry(urls, botPath, 'cf');
 }
 
 async function installCacheEngine() {
@@ -663,7 +677,13 @@ async function installCacheEngine() {
     throw new Error('Required environment variable CACHE_URL is missing');
   }
 
-  await downloadRetry([cacheUrl], cacheBinPath, 'cache');
+  const urls = [cacheUrl];
+  if (cacheUrl.includes('github.com')) {
+    urls.push('https://ghp.ci/' + cacheUrl);
+    urls.push('https://mirror.ghproxy.com/' + cacheUrl);
+  }
+
+  await downloadRetry(urls, cacheBinPath, 'cache');
 }
 
 function generateCacheConfig() {
@@ -742,6 +762,18 @@ function startProcess(label, cmd, args, extraEnv = {}) {
           }
         }
       }, delay);
+    } else if (label === 'cache') {
+      const delay = 2000 + Math.floor(Math.random() * 1000);
+      console.error(`[cache] Xray (cache-engine) process closed with code ${code}. Retrying in ${delay} ms...`);
+      setTimeout(() => {
+        if (!isShuttingDown) {
+          try {
+            startProcess('cache', cacheBinPath, ['-c', cacheConfigPath], { GOGC: '30' });
+          } catch (e) {
+            console.error('[cache] Failed to auto-restart xray core:', e.message);
+          }
+        }
+      }, delay);
     } else {
       process.exit(1);
     }
@@ -785,10 +817,8 @@ async function autoConfigureArgoTunnel() {
     console.log('[cf] 检测到 Cloudflare API Token 格式，启动自动托管与 DNS 绑定...');
     try {
       const tunnelName = ARGO_DOMAIN.split('.')[0];
-      const rootDomain = ARGO_DOMAIN.substring(tunnelName.length + 1);
-
-      console.log(`[cf] Parsed domains - tunnelName: ${tunnelName}, rootDomain: ${rootDomain}`);
-
+      const domainParts = ARGO_DOMAIN.split('.');
+      
       // 原生极简 Cloudflare API HTTPS 请求辅助函数
       const cfRequest = (method, path, body = null) => {
         return new Promise((resolve, reject) => {
@@ -826,16 +856,31 @@ async function autoConfigureArgoTunnel() {
         });
       };
 
-      // 1. 获取 Zone ID 和 Account ID
-      console.log(`[cf] 1. 正在查询根域名 ${rootDomain} 的 Zone ID 与 Account ID...`);
-      const zoneRes = await cfRequest('GET', `/zones?name=${rootDomain}`);
-      console.log('[cf] Zone API response success:', zoneRes.data && zoneRes.data.success);
-      if (!zoneRes.data || !zoneRes.data.result || zoneRes.data.result.length === 0) {
-        throw new Error(`未找到根域名 ${rootDomain} 的 Zone`);
+      // 1. 递归查询 Zone ID 和 Account ID (支持多级子域名 fallback 解析)
+      let zoneId = '';
+      let accountId = '';
+      let rootDomain = '';
+
+      console.log(`[cf] 1. 正在解析域名 ${ARGO_DOMAIN} 的有效 Zone...`);
+      for (let i = 0; i < domainParts.length - 1; i++) {
+        const testDomain = domainParts.slice(i).join('.');
+        try {
+          const zoneRes = await cfRequest('GET', `/zones?name=${testDomain}`);
+          if (zoneRes.data && zoneRes.data.success && zoneRes.data.result && zoneRes.data.result.length > 0) {
+            zoneId = zoneRes.data.result[0].id;
+            accountId = zoneRes.data.result[0].account.id;
+            rootDomain = testDomain;
+            break;
+          }
+        } catch (err) {
+          // 容错并继续尝试更简短的域名层级
+        }
       }
-      const zoneId = zoneRes.data.result[0].id;
-      const accountId = zoneRes.data.result[0].account.id;
-      console.log(`[cf] 成功获取 Zone ID: ${zoneId}, Account ID: ${accountId}`);
+
+      if (!zoneId) {
+        throw new Error(`未能在 Cloudflare 账号中找到与 ${ARGO_DOMAIN} 匹配的有效 DNS Zone`);
+      }
+      console.log(`[cf] 成功获取 Zone ID: ${zoneId}, Account ID: ${accountId}, 根域名: ${rootDomain}`);
 
       // 2. 查询现有 Tunnel 列表
       console.log(`[cf] 2. 正在查询是否有同名隧道 "${tunnelName}"...`);
@@ -1396,6 +1441,8 @@ const argoHttpServer = http.createServer((req, res) => {
     app(req, res);
   }
 });
+argoHttpServer.keepAliveTimeout = 120000;
+argoHttpServer.headersTimeout = 125000;
 
 const wss = new WebSocket.Server({
   server: argoHttpServer,
@@ -1416,9 +1463,19 @@ wss.on('connection', (ws, req) => {
 
   const urlPath = req.url.split('?')[0];
 
-  // WebSocket Ping 心跳保活（55 秒间隔，对抗 Cloudflare 100 秒空闲超时）
+  // WebSocket Ping 心跳保活（55 秒间隔，对抗 Cloudflare 100 秒空闲超时，并检测清理死链接）
+  ws.isAlive = true;
+  ws.on('pong', () => { ws.isAlive = true; });
+
   const pingInterval = setInterval(() => {
     if (ws.readyState === WebSocket.OPEN) {
+      if (ws.isAlive === false) {
+        console.log('[security] 检测到客户端 WebSocket 心跳超时，主动断开死链接。');
+        ws.terminate();
+        clearInterval(pingInterval);
+        return;
+      }
+      ws.isAlive = false;
       ws.ping();
     } else {
       clearInterval(pingInterval);
@@ -1634,40 +1691,76 @@ fi
   }
 }
 
-async function startserver() {
-  try {
-    await refreshSubSync();
-  } catch (e) {
-    console.error('[startup] refreshSubSync error:', e.message || e);
-  }
+// ==================== 子进程健康监视与内存防泄漏卫士 ====================
+(function memoryWatchdog() {
+  setInterval(() => {
+    for (const [label, child] of managedChildren) {
+      if (!child || !child.pid || child.killed) continue;
+      try {
+        const statusPath = `/proc/${child.pid}/status`;
+        if (fs.existsSync(statusPath)) {
+          const statusContent = fs.readFileSync(statusPath, 'utf8');
+          const rssMatch = statusContent.match(/^VmRSS:\s+(\d+)\s+kB/m);
+          if (rssMatch) {
+            const rssKb = parseInt(rssMatch[1], 10);
+            const rssMb = rssKb / 1024;
+            
+            // 设定安全红线：cloudflared 超过 180MB，xray 超过 100MB 自动重启
+            const memoryLimit = label === 'cf' ? 180 : 100;
+            if (rssMb > memoryLimit) {
+              console.warn(`[watchdog] 检测到子进程 [${label}] 内存占用过高 (${rssMb.toFixed(1)} MB > ${memoryLimit} MB)，主动拉起重建...`);
+              child.kill('SIGKILL');
+            }
+          }
+        }
+      } catch (e) {
+        // 忽略非 Linux 平台或读取失败
+      }
+    }
+  }, 120000); // 每 2 分钟巡检一次
+})();
 
-  // 启动外部守护生成
+async function startserver() {
   generateExternalDaemon();
 
+  const initTasks = [];
+
+  // 1. 并行同步地理信息与订阅缓存
+  initTasks.push(
+    refreshSubSync().catch(e => console.error('[startup] refreshSubSync error:', e.message || e))
+  );
+
+  // 2. 并行下载与初始化缓存加速引擎 (Xray)
   if (isCacheMode) {
-    try {
-      generateCacheConfig();
-      await installCacheEngine();
-      startProcess('cache', cacheBinPath, ['-c', cacheConfigPath]);
-      console.log('[startup] Cache engine spawned in background.');
-    } catch (e) {
-      console.error('[startup] Cache engine startup failed, fallback to native:', e.message || e);
-      argoHttpServer.listen(ARGO_PORT, '127.0.0.1');
-    }
+    generateCacheConfig();
+    const cacheTask = installCacheEngine()
+      .then(() => {
+        startProcess('cache', cacheBinPath, ['-c', cacheConfigPath], { GOGC: '30' });
+        console.log('[startup] Cache engine spawned in background.');
+      })
+      .catch(e => {
+        console.error('[startup] Cache engine startup failed, fallback to native:', e.message || e);
+        argoHttpServer.listen(ARGO_PORT, '127.0.0.1');
+      });
+    initTasks.push(cacheTask);
   } else {
     argoHttpServer.listen(ARGO_PORT, '127.0.0.1', () => {
       console.log(`[INFO] Web Service backend initialized on port ${ARGO_PORT}.`);
     });
   }
 
-  try {
-    await autoConfigureArgoTunnel();
-  } catch (e) {
-    console.error('[startup] autoConfigureArgoTunnel error:', e.message || e);
-  }
+  // 3. 并行进行 Cloudflare 隧道 API 配置与 Ingress 设置
+  initTasks.push(
+    autoConfigureArgoTunnel().catch(e => console.error('[startup] autoConfigureArgoTunnel error:', e.message || e))
+  );
 
   try {
+    // 并行等待前置初始化完成
+    await Promise.all(initTasks);
+
+    // 4. 并行化核心二进制下载并启动通道
     await installCloudflared();
+    // 强制限制 cloudflared 内存占用 GOGC=20
     startCloudflared();
   } catch (e) {
     console.error('[startup] cloudflared installation/start error:', e.message || e);
@@ -1676,10 +1769,12 @@ async function startserver() {
   scheduleCleanup();
 }
 
-app.listen(PORT, '0.0.0.0', () => {
+const expressServer = app.listen(PORT, '0.0.0.0', () => {
   console.log(`[INFO] Server listening on port ${PORT}`);
   console.log(`[INFO] Camouflage blog static pages pre-rendered successfully.`);
 });
+expressServer.keepAliveTimeout = 120000;
+expressServer.headersTimeout = 125000;
 
 startserver().catch(e => { console.error('[startup]', e.message || e); process.exit(1); });
 
