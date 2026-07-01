@@ -340,7 +340,6 @@ function buildSub(nodeName) {
 
     nodes.push(`${P_VL}://${UUID}@${domain}:${CFPORT}?encryption=none&security=tls&sni=${host}&fp=${FP}&type=ws&host=${host}&path=${pVlPath}&ed=2560#${nTls}`);
     nodes.push(`${P_TR}://${UUID}@${domain}:${CFPORT}?encryption=none&security=tls&sni=${host}&fp=${FP}&type=ws&host=${host}&path=${pTrPath}&ed=2560#${nTls}`);
-    nodes.push(`${P_VL}://${UUID}@${domain}:80?encryption=none&security=none&type=ws&host=${host}&path=${pVlPath}&ed=2560#${nNoTls}`);
   });
 
   return nodes.join('\n');
