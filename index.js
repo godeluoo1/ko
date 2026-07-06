@@ -1085,34 +1085,95 @@ function cfApiCall(method, path, apiToken, body = null) {
 
 async function autoConfigureArgoTunnel() {
   if (ARGO_AUTH.includes('TunnelSecret') || ARGO_AUTH.length > 100) {
-      headers: {
-        'Authorization': `Bearer ${apiToken}`,
-        'Content-Type': 'application/json'
+    // 已经是真实的 Tunnel Token，不需要托管
+    return;
+  }
+
+  if (ARGO_AUTH.length >= 30 && ARGO_AUTH.length <= 60) {
+    console.log('[cf] 检测到 Cloudflare API Token 格式，启动自动托管与 DNS 绑定...');
+    try {
+      const rootDomain = ARGO_DOMAIN;
+      if (!rootDomain) {
+        throw new Error('未配置 APP_DOMAIN，无法自动创建隧道和 DNS 记录');
       }
-    });
 
-    // 6. 添加 DNS CNAME 记录
-    console.log(`[cf] Creating CNAME record for ${fullSubDomain} pointing to ${tunnelId}.cfargotunnel.com`);
-    await httpPost(`https://api.cloudflare.com/client/v4/zones/${zoneId}/dns_records`, {
-      type: 'CNAME',
-      name: fullSubDomain,
-      content: `${tunnelId}.cfargotunnel.com`,
-      proxied: true
-    }, {
-      headers: {
-        'Authorization': `Bearer ${apiToken}`,
-        'Content-Type': 'application/json'
+      // 1. 获取 Zone ID 和 Account ID
+      console.log(`[cf] 正在查询根域名 ${rootDomain} 的 Zone ID 与 Account ID...`);
+      const zoneRes = await cfApiCall('GET', `/zones?name=${rootDomain}`, ARGO_AUTH);
+      if (!zoneRes || !zoneRes.result || zoneRes.result.length === 0) {
+        throw new Error(`未找到根域名 ${rootDomain} 的 Zone 或 API Token 权限不足`);
       }
-    });
+      const zoneId = zoneRes.result[0].id;
+      const accountId = zoneRes.result[0].account.id;
+      console.log(`[cf] 成功获取 Zone ID: ${zoneId}, Account ID: ${accountId}`);
 
-    // 7. 将生成的 Token 赋给 ARGO_AUTH，并将生成的随机子域名赋给全局变量
-    ARGO_AUTH = realToken;
-    process.env.AUTO_LAUNCHED_DOMAIN = fullSubDomain;
-    console.log(`\n🎉 [cf] AUTO CONFIGURATION SUCCESS!`);
-    console.log(`👉 Your dynamic proxy URL: https://${fullSubDomain}/${SUB_PATH}\n`);
+      // 2. 自动生成随机子域名
+      const randomPrefix = 'cfut-' + rnd(6);
+      const randomSubdomain = `${randomPrefix}.${rootDomain}`;
+      console.log(`[cf] 本次随机生成的前缀域名: ${randomSubdomain}`);
 
-  } catch (err) {
-    console.error('[cf] Auto configure failed:', err.message);
+      // 3. 查询或创建隧道 (固定使用 'node-auto-tunnel' 作为隧道名避免重复生成)
+      const tunnelName = 'node-auto-tunnel';
+      console.log(`[cf] 正在查询是否有隧道 "${tunnelName}"...`);
+      const listRes = await cfApiCall('GET', `/accounts/${accountId}/cfd_tunnel?is_deleted=false`, ARGO_AUTH);
+      const tunnels = listRes.result || [];
+      const existingTunnel = tunnels.find(t => t.name === tunnelName);
+
+      let tunnelId = '';
+      let realToken = '';
+
+      if (existingTunnel) {
+        tunnelId = existingTunnel.id;
+        console.log(`[cf] 找到同名现有隧道, ID: ${tunnelId}. 正在拉取真实 Tunnel Token...`);
+        const tokenRes = await cfApiCall('GET', `/accounts/${accountId}/cfd_tunnel/${tunnelId}/token`, ARGO_AUTH);
+        realToken = tokenRes.result;
+      } else {
+        console.log(`[cf] 未找到同名隧道，正在为您新建隧道 "${tunnelName}"...`);
+        const tunnelSecret = crypto.randomBytes(32).toString('base64');
+        const createRes = await cfApiCall('POST', `/accounts/${accountId}/cfd_tunnel`, ARGO_AUTH, {
+          name: tunnelName,
+          config_src: 'cloudflare',
+          tunnel_secret: tunnelSecret
+        });
+        if (!createRes || !createRes.result) {
+          throw new Error('创建隧道失败: ' + JSON.stringify(createRes));
+        }
+        tunnelId = createRes.result.id;
+        realToken = createRes.result.token;
+        console.log(`[cf] 隧道新建成功, ID: ${tunnelId}`);
+      }
+
+      // 4. 配置隧道的 Ingress，将新生成的随机域名映射至本地端口
+      console.log(`[cf] 正在配置隧道的 Ingress 规则，映射至本地 ${PORT} 端口...`);
+      await cfApiCall('PUT', `/accounts/${accountId}/cfd_tunnel/${tunnelId}/configurations`, ARGO_AUTH, {
+        config: {
+          ingress: [
+            { hostname: randomSubdomain, service: `http://localhost:${PORT}` },
+            { service: 'http_status:404' }
+          ],
+          'warp-routing': { enabled: false }
+        }
+      });
+
+      // 5. 自动管理 DNS CNAME 记录，添加新随机子域名的解析
+      console.log(`[cf] 正在自动为 ${randomSubdomain} 创建 DNS 代理 CNAME 记录指向 ${tunnelId}.cfargotunnel.com ...`);
+      await cfApiCall('POST', `/zones/${zoneId}/dns_records`, ARGO_AUTH, {
+        name: randomSubdomain,
+        type: 'CNAME',
+        content: `${tunnelId}.cfargotunnel.com`,
+        proxied: true
+      });
+
+      // 6. 覆写全局变量与动态子域名供订阅构建使用
+      if (realToken) {
+        ARGO_AUTH = realToken;
+        process.env.AUTO_LAUNCHED_DOMAIN = randomSubdomain;
+        console.log(`\n🎉 [cf] Cloudflare API 自动配置托管成功完成！`);
+        console.log(`👉 Your dynamic proxy URL: https://${randomSubdomain}/${SUB_PATH}\n`);
+      }
+    } catch (e) {
+      console.error('[cf] Cloudflare API 自动配置失败，回退到原模式:', e.message || e);
+    }
   }
 }
 
