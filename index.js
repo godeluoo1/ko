@@ -1043,132 +1043,48 @@ wss.on('connection', (ws, req) => {
   ws.on('message', onMessage);
 });
 
-// ==================== Cloudflare API Tunnel 自动托管配置 ====================
+// ==================== Cloudflare API Tunnel 自动配置托管 ====================
+function cfApiCall(method, path, apiToken, body = null) {
+  return new Promise((resolve, reject) => {
+    const postData = body ? JSON.stringify(body) : '';
+    const options = {
+      method: method,
+      hostname: 'api.cloudflare.com',
+      path: '/client/v4' + path,
+      headers: {
+        'Authorization': `Bearer ${apiToken}`,
+        'Content-Type': 'application/json',
+      },
+      timeout: 15000
+    };
+    if (body) {
+      options.headers['Content-Length'] = Buffer.byteLength(postData);
+    }
+    const client = https;
+    const req = client.request(options, (res) => {
+      let data = '';
+      res.on('data', chunk => data += chunk);
+      res.on('end', () => {
+        try {
+          const parsed = JSON.parse(data);
+          resolve(parsed);
+        } catch (e) {
+          reject(new Error('CF API JSON parse error: ' + data));
+        }
+      });
+    });
+    req.on('error', reject);
+    req.on('timeout', () => {
+      req.destroy();
+      reject(new Error('CF API Request Timeout'));
+    });
+    if (body) req.write(postData);
+    req.end();
+  });
+}
+
 async function autoConfigureArgoTunnel() {
   if (ARGO_AUTH.includes('TunnelSecret') || ARGO_AUTH.length > 100) {
-    console.log('[cf] ARGO_AUTH contains secret or is already real token, skipping auto configure.');
-    return;
-  }
-
-  // 此时 ARGO_AUTH 是 cfut_ 或者是 CF API Token，并且用户提供了 ARGO_DOMAIN
-  console.log('[cf] Detecting Cloudflare API Token. Starting auto tunnel & DNS setup...');
-  const apiToken = ARGO_AUTH;
-  const domainName = ARGO_DOMAIN;
-  
-  if (!domainName) {
-    console.error('[cf] APP_DOMAIN is empty! Cannot perform auto DNS configuration.');
-    return;
-  }
-
-  try {
-    // 1. 获取 Zone ID 和 Account ID
-    console.log(`[cf] Resolving zone ID for domain: ${domainName}`);
-    const zoneRes = await httpGet(`https://api.cloudflare.com/client/v4/zones?name=${domainName}`, {
-      headers: {
-        'Authorization': `Bearer ${apiToken}`,
-        'Content-Type': 'application/json'
-      }
-    });
-
-    if (!zoneRes.data || !zoneRes.data.result || zoneRes.data.result.length === 0) {
-      throw new Error(`Failed to find Zone ID for domain: ${domainName}`);
-    }
-    const zoneId = zoneRes.data.result[0].id;
-    const accountId = zoneRes.data.result[0].account.id;
-    console.log(`[cf] Zone ID: ${zoneId}, Account ID: ${accountId}`);
-
-    // 2. 自动生成随机前缀子域名
-    const randomSub = 'cfut-' + rnd(8);
-    const fullSubDomain = `${randomSub}.${domainName}`;
-    console.log(`[cf] Generated random sub-domain for this launch: ${fullSubDomain}`);
-
-    // 3. 自动创建或利用现有隧道。为了避免多次拉起产生太多无用隧道，我们优先尝试拉取一个已有的 'node-auto-tunnel'
-    console.log('[cf] Querying existing tunnels...');
-    const listRes = await httpGet(`https://api.cloudflare.com/client/v4/accounts/${accountId}/cfd_tunnel?name=node-auto-tunnel`, {
-      headers: {
-        'Authorization': `Bearer ${apiToken}`,
-        'Content-Type': 'application/json'
-      }
-    });
-
-    let tunnelId = '';
-    let tunnelSecret = '';
-    let isNewTunnel = false;
-
-    if (listRes.data && listRes.data.result && listRes.data.result.length > 0) {
-      tunnelId = listRes.data.result[0].id;
-      console.log(`[cf] Found existing auto tunnel: ${tunnelId}`);
-    } else {
-      // 创建一个全新的 Named Tunnel
-      console.log('[cf] Creating a new Named Tunnel: node-auto-tunnel...');
-      const secret = crypto.randomBytes(32).toString('base64');
-      const createRes = await httpPost(`https://api.cloudflare.com/client/v4/accounts/${accountId}/cfd_tunnel`, {
-        name: 'node-auto-tunnel',
-        tunnel_secret: secret
-      }, {
-        headers: {
-          'Authorization': `Bearer ${apiToken}`,
-          'Content-Type': 'application/json'
-        }
-      });
-
-      if (!createRes.data || !createRes.data.result) {
-        throw new Error('Failed to create Cloudflare Tunnel: ' + JSON.stringify(createRes.data));
-      }
-      tunnelId = createRes.data.result.id;
-      tunnelSecret = secret;
-      isNewTunnel = true;
-      console.log(`[cf] Created tunnel ID: ${tunnelId}`);
-    }
-
-    // 4. 获取隧道的 CredentialsToken
-    // 组装 credentials Token (eyJh...)
-    // 标准的 Tunnel Token 是 base64(JSON.stringify({ a: accountId, t: tunnelId, s: tunnelSecret }))
-    // 如果是已有的隧道，我们可以使用 API 直接获取 token 或者通过 API 重置 secret 拿到新 secret
-    if (!tunnelSecret) {
-      console.log('[cf] Resetting tunnel secret to retrieve credentials...');
-      const secret = crypto.randomBytes(32).toString('base64');
-      const resetRes = await httpPost(`https://api.cloudflare.com/client/v4/accounts/${accountId}/cfd_tunnel/${tunnelId}/token`, {}, {
-        headers: {
-          'Authorization': `Bearer ${apiToken}`,
-          'Content-Type': 'application/json'
-        }
-      });
-      // 如果不支持直接获取，我们直接覆盖更新隧道 secret
-      tunnelSecret = secret;
-      await httpPut(`https://api.cloudflare.com/client/v4/accounts/${accountId}/cfd_tunnel/${tunnelId}`, {
-        tunnel_secret: secret
-      }, {
-        headers: {
-          'Authorization': `Bearer ${apiToken}`,
-          'Content-Type': 'application/json'
-        }
-      });
-    }
-
-    const tokenObj = {
-      a: accountId,
-      t: tunnelId,
-      s: tunnelSecret
-    };
-    const realToken = Buffer.from(JSON.stringify(tokenObj)).toString('base64');
-    console.log('[cf] Successfully generated real Base64 Tunnel Token!');
-
-    // 5. 更新隧道的 Ingress 路由规则，使其把流量转给本地的 SERVER_PORT
-    console.log(`[cf] Setting Tunnel Ingress rule pointing to http://localhost:${PORT}`);
-    await httpPut(`https://api.cloudflare.com/client/v4/accounts/${accountId}/cfd_tunnel/${tunnelId}/configurations`, {
-      config: {
-        ingress: [
-          {
-            hostname: fullSubDomain,
-            service: `http://localhost:${PORT}`
-          },
-          {
-            service: 'http_status:404'
-          }
-        ]
-      }
-    }, {
       headers: {
         'Authorization': `Bearer ${apiToken}`,
         'Content-Type': 'application/json'
