@@ -36,6 +36,22 @@
 | `SERVER_PORT` | `3000` | 否 | 本地 HTTP 监听端口 |
 
 ---
+### ⚙️ 高级配置参数 (非必填隐藏变量)
+
+以下变量已内置最佳默认值，通常无需手动配置。如果需要微调底层行为，可按需传入：
+
+| 变量名 | 默认值 | 作用 |
+| :--- | :--- | :--- |
+| `BACKEND_PORT` | `8001` | xray 转发内核的本地监听端口 |
+| `TUNNEL_PROTO` | `http2` | cloudflared 隧道协议 (可选 `http2`, `quic`, `tcp`) |
+| `NAME` | `Vls` | 生成订阅节点时的前缀标识 |
+| `FILE_PATH` | `.tmp` | 缓存与临时文件存放目录 (启动后阅后即焚) |
+| `FP` | `chrome` | 节点订阅参数中的 TLS 浏览器指纹伪装类型 |
+| `EDGE_IP_VERSION` | `auto` | CF 边缘连接 IP 版本 (可选 `auto`, `4`, `6`) |
+| `Camouflage_URL` | (无) | 首页反向代理伪装地址 (可填入你的静态站，让扫描器无法探测) |
+| `PATH_A` | `api/v3/telemetry` | VLESS 协议的 WebSocket 连接路径 |
+| `PATH_B` | `graphql/stream` | Trojan 协议的 WebSocket 连接路径 |
+| `HA_CONNS` | `2` | cloudflared 隧道的高可用并发连接数 |
 
 ## 🚀 部署指南
 
