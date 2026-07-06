@@ -1481,6 +1481,7 @@ async function startserver() {
     }
 
     if (tunnelMode === 'token' || tunnelMode === 'json') {
+      await autoConfigureArgoTunnel();
       await installCloudflared();
       startCloudflared();
       console.log('[startup] Argo Tunnel process spawned in background.');
