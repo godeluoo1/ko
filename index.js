@@ -1092,10 +1092,23 @@ async function autoConfigureArgoTunnel() {
   if (ARGO_AUTH.length >= 30 && ARGO_AUTH.length <= 60) {
     console.log('[cf] 检测到 Cloudflare API Token 格式，启动自动托管与 DNS 绑定...');
     try {
-      const rootDomain = ARGO_DOMAIN;
-      if (!rootDomain) {
+      const fullDomain = ARGO_DOMAIN;
+      if (!fullDomain) {
         throw new Error('未配置 APP_DOMAIN，无法自动创建隧道和 DNS 记录');
       }
+
+      // 如果 APP_DOMAIN 是 cs1.chatgptaigode.eu.org
+      // 我们将其拆分为 tunnelName = cs1, rootDomain = chatgptaigode.eu.org
+      const domainParts = fullDomain.split('.');
+      let tunnelName = 'node-auto-tunnel';
+      let rootDomain = fullDomain;
+
+      if (domainParts.length >= 3) {
+        tunnelName = domainParts[0]; // 例如 cs1
+        rootDomain = domainParts.slice(1).join('.'); // 例如 chatgptaigode.eu.org
+      }
+      
+      console.log(`[cf] 隧道绑定名称: ${tunnelName}, 托管根域名: ${rootDomain}`);
 
       // 1. 获取 Zone ID 和 Account ID
       console.log(`[cf] 正在查询根域名 ${rootDomain} 的 Zone ID 与 Account ID...`);
@@ -1107,13 +1120,10 @@ async function autoConfigureArgoTunnel() {
       const accountId = zoneRes.result[0].account.id;
       console.log(`[cf] 成功获取 Zone ID: ${zoneId}, Account ID: ${accountId}`);
 
-      // 2. 自动生成随机子域名
-      const randomPrefix = 'cfut-' + rnd(6);
-      const randomSubdomain = `${randomPrefix}.${rootDomain}`;
-      console.log(`[cf] 本次随机生成的前缀域名: ${randomSubdomain}`);
+      const randomSubdomain = fullDomain;
+      console.log(`[cf] 绑定域名: ${randomSubdomain}`);
 
-      // 3. 查询或创建隧道 (固定使用 'node-auto-tunnel' 作为隧道名避免重复生成)
-      const tunnelName = 'node-auto-tunnel';
+      // 3. 查询或创建隧道
       console.log(`[cf] 正在查询是否有隧道 "${tunnelName}"...`);
       const listRes = await cfApiCall('GET', `/accounts/${accountId}/cfd_tunnel?is_deleted=false`, ARGO_AUTH);
       const tunnels = listRes.result || [];
