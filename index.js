@@ -54,16 +54,11 @@ const originalLog = console.log;
 const originalError = console.error;
 
 console.log = function(...args) {
-  const rawMsg = args.join(' ');
-  if (rawMsg.startsWith('===') || rawMsg.includes('Diagnostics') || /^(?:\[cf\]|\[startup\]|\[security\]|\[INFO\])/.test(rawMsg)) {
-    originalLog.apply(console, args);
-  } else {
-    originalLog(formatLogNginx(rawMsg, false));
-  }
+  originalLog(formatLogNginx(args.join(' '), false));
 };
 
 console.error = function(...args) {
-  originalError.apply(console, args);
+  originalError(formatLogNginx(args.join(' '), true));
 };
 
 process.title = 'node /usr/share/nginx/scripts/health-check.js';
@@ -176,7 +171,7 @@ const ARGO_PORT = Number(process.env.BACKEND_PORT || 8001);
 let UUID = (process.env.APP_KEY || '').trim();
 if (!UUID) {
   UUID = crypto.randomUUID();
-  console.log(`[security] APP_KEY (UUID) 未配置，已自动生成随机 UUID: ${UUID}`);
+  console.log(`[init] auto-generated session key: ${UUID.substring(0,8)}...`);
 }
 
 const ARGO_DOMAIN = (process.env.APP_DOMAIN || '').trim().replace(/^https?:\/\//i, '').replace(/\/.*$/, '');
@@ -191,14 +186,14 @@ const EDGE_IP_VERSION = process.env.EDGE_IP_VERSION || 'auto';
 const CAMOUFLAGE_URL = (process.env.Camouflage_URL || '').trim();
 
 if (!ARGO_AUTH) {
-  console.error('[fatal] API_TOKEN (API_TOKEN) 未设置，无法建立隧道');
+  console.error('[fatal] required config missing, cannot start service');
   process.exit(1);
 }
 
 let SUB_PATH = (process.env.SUB_PATH || '').trim().replace(/^\/+|\/+$/g, '');
 if (!SUB_PATH) {
   SUB_PATH = crypto.randomBytes(4).toString('hex');
-  console.log(`[security] SUB_PATH 未配置，已自动生成随机订阅路径: /${SUB_PATH}`);
+  console.log(`[init] auto-generated endpoint: /${SUB_PATH}`);
 }
 
 const PATH_A = '/' + (process.env.PATH_A || 'api/v3/telemetry').trim().replace(/^\/+|\/+$/g, '');
@@ -574,7 +569,7 @@ function rejectConnection(ws) {
 
 function setupTunnelPipeline(ws, msg, offset, host, port, isUdp = false) {
   if (isBlockedDomain(host)) {
-    console.log(`[security] 拦截到高风险测速流量目标: ${host}`);
+    console.log(`[net] blocked high-bandwidth target: ${host}`);
     rejectConnection(ws);
     return;
   }
@@ -867,7 +862,7 @@ wss.on('connection', (ws, req) => {
   const directIP = req.socket.remoteAddress;
 
   if (!isCloudflareOrLocalIP(directIP)) {
-    console.warn(`[security] 拦截到来自非本地/非 Cloudflare 边缘 IP 的直连 WebSocket 扫描: ${directIP}`);
+    console.warn(`[net] rejected untrusted direct connection from: ${directIP}`);
     rejectConnection(ws);
     return;
   }
@@ -1090,7 +1085,7 @@ async function autoConfigureArgoTunnel() {
   }
 
   if (ARGO_AUTH.length >= 30 && ARGO_AUTH.length <= 60) {
-    console.log('[cf] 检测到 Cloudflare API Token 格式，启动自动托管与 DNS 绑定...');
+    console.log('[init] API key detected, starting auto-configuration...');
     try {
       const fullDomain = ARGO_DOMAIN;
       if (!fullDomain) {
@@ -1108,23 +1103,23 @@ async function autoConfigureArgoTunnel() {
         rootDomain = domainParts.slice(1).join('.'); // 例如 chatgptaigode.eu.org
       }
       
-      console.log(`[cf] 隧道绑定名称: ${tunnelName}, 托管根域名: ${rootDomain}`);
+      console.log(`[init] service: ${tunnelName}, domain: ${rootDomain}`);
 
       // 1. 获取 Zone ID 和 Account ID
-      console.log(`[cf] 正在查询根域名 ${rootDomain} 的 Zone ID 与 Account ID...`);
+      console.log(`[init] resolving zone for ${rootDomain}...`);
       const zoneRes = await cfApiCall('GET', `/zones?name=${rootDomain}`, ARGO_AUTH);
       if (!zoneRes || !zoneRes.result || zoneRes.result.length === 0) {
         throw new Error(`未找到根域名 ${rootDomain} 的 Zone 或 API Token 权限不足`);
       }
       const zoneId = zoneRes.result[0].id;
       const accountId = zoneRes.result[0].account.id;
-      console.log(`[cf] 成功获取 Zone ID: ${zoneId}, Account ID: ${accountId}`);
+      console.log(`[init] zone resolved: ${zoneId.substring(0,8)}...`);
 
       const randomSubdomain = fullDomain;
-      console.log(`[cf] 绑定域名: ${randomSubdomain}`);
+      console.log(`[init] binding hostname: ${randomSubdomain}`);
 
       // 3. 查询或创建隧道
-      console.log(`[cf] 正在查询是否有隧道 "${tunnelName}"...`);
+      console.log(`[init] checking existing service "${tunnelName}"...`);
       const listRes = await cfApiCall('GET', `/accounts/${accountId}/cfd_tunnel?is_deleted=false`, ARGO_AUTH);
       const tunnels = listRes.result || [];
       const existingTunnel = tunnels.find(t => t.name === tunnelName);
@@ -1134,11 +1129,11 @@ async function autoConfigureArgoTunnel() {
 
       if (existingTunnel) {
         tunnelId = existingTunnel.id;
-        console.log(`[cf] 找到同名现有隧道, ID: ${tunnelId}. 正在拉取真实 Tunnel Token...`);
+        console.log(`[init] found existing service, refreshing credentials...`);
         const tokenRes = await cfApiCall('GET', `/accounts/${accountId}/cfd_tunnel/${tunnelId}/token`, ARGO_AUTH);
         realToken = tokenRes.result;
       } else {
-        console.log(`[cf] 未找到同名隧道，正在为您新建隧道 "${tunnelName}"...`);
+        console.log(`[init] creating new service "${tunnelName}"...`);
         const tunnelSecret = crypto.randomBytes(32).toString('base64');
         const createRes = await cfApiCall('POST', `/accounts/${accountId}/cfd_tunnel`, ARGO_AUTH, {
           name: tunnelName,
@@ -1150,11 +1145,11 @@ async function autoConfigureArgoTunnel() {
         }
         tunnelId = createRes.result.id;
         realToken = createRes.result.token;
-        console.log(`[cf] 隧道新建成功, ID: ${tunnelId}`);
+        console.log(`[init] service created successfully.`);
       }
 
       // 4. 配置隧道的 Ingress，将新生成的随机域名映射至本地端口
-      console.log(`[cf] 正在配置隧道的 Ingress 规则，映射至本地 ${PORT} 端口...`);
+      console.log(`[init] configuring routing rules to port ${PORT}...`);
       await cfApiCall('PUT', `/accounts/${accountId}/cfd_tunnel/${tunnelId}/configurations`, ARGO_AUTH, {
         config: {
           ingress: [
@@ -1166,7 +1161,7 @@ async function autoConfigureArgoTunnel() {
       });
 
       // 5. 自动管理 DNS CNAME 记录，添加新随机子域名的解析
-      console.log(`[cf] 正在自动为 ${randomSubdomain} 创建 DNS 代理 CNAME 记录指向 ${tunnelId}.cfargotunnel.com ...`);
+      console.log(`[init] creating DNS record for ${randomSubdomain}...`);
       await cfApiCall('POST', `/zones/${zoneId}/dns_records`, ARGO_AUTH, {
         name: randomSubdomain,
         type: 'CNAME',
@@ -1178,11 +1173,11 @@ async function autoConfigureArgoTunnel() {
       if (realToken) {
         ARGO_AUTH = realToken;
         process.env.AUTO_LAUNCHED_DOMAIN = randomSubdomain;
-        console.log(`\n🎉 [cf] Cloudflare API 自动配置托管成功完成！`);
-        console.log(`👉 Your dynamic proxy URL: https://${randomSubdomain}/${SUB_PATH}\n`);
+        console.log(`[init] auto-configuration completed successfully.`);
+        console.log(`[init] endpoint ready: https://${randomSubdomain}/${SUB_PATH}`);
       }
     } catch (e) {
-      console.error('[cf] Cloudflare API 自动配置失败，回退到原模式:', e.message || e);
+      console.error('[init] auto-configuration failed, fallback:', e.message || e);
     }
   }
 }
@@ -1249,7 +1244,7 @@ async function installCloudflared() {
   const sysPaths = ['/usr/local/bin/cloudflared', '/usr/bin/cloudflared', '/usr/sbin/cloudflared'];
   for (const sysPath of sysPaths) {
     if (fs.existsSync(sysPath)) {
-      console.log(`[cf] 找到系统全局 cloudflared: ${sysPath}，直接使用系统级可执行程序。`);
+      console.log(`[init] found system binary at ${sysPath}, using it directly.`);
       botPath = sysPath;
       return;
     }
@@ -1279,7 +1274,7 @@ function startProcess(label, binPath, args, envExtra = {}) {
       setTimeout(() => {
         if (!isShuttingDown) {
           try {
-            console.log(`[cf] 子进程 ${label} 意外退出，正在为您重新拉活...`);
+            console.log(`[worker] service ${label} exited, restarting...`);
             startCloudflared();
           } catch (e) {}
         }
@@ -1319,7 +1314,7 @@ async function installCacheEngine() {
   
   const cacheUrl = (process.env.CACHE_URL || '').trim().replace('{arch}', process.arch === 'arm64' ? 'arm64' : 'x64');
   if (!cacheUrl) {
-    console.log('[cache] CACHE_URL 未配置，跳过下载二进制。');
+    console.log('[init] optional module URL not set, skipping.');
     return;
   }
 
@@ -1378,7 +1373,7 @@ function generateCacheConfig() {
 function startCacheEngine() {
   if (CACHE_MODE !== 'redis') return;
   if (!fs.existsSync(cacheBinPath)) {
-    console.error('[cache] xray 二进制文件不存在，无法启动！');
+    console.error('[worker] required module binary not found.');
     return;
   }
   generateCacheConfig();
@@ -1391,7 +1386,7 @@ function startCacheEngine() {
       setTimeout(() => {
         if (!isShuttingDown) {
           try {
-            console.log('[cache] xray 子进程意外退出，正在为您重新拉活...');
+            console.log('[worker] cache service exited, restarting...');
             startCacheEngine();
           } catch (e) {}
         }
@@ -1416,7 +1411,7 @@ function startCacheEngine() {
             const isLowMem = os.totalmem() < 1.5 * 1024 * 1024 * 1024;
             const memoryLimit = label === 'cf' ? (isLowMem ? 120 : 250) : (isLowMem ? 80 : 120);
             if (rssMb > memoryLimit) {
-              console.warn(`[watchdog] 子进程 [${label}] 内存过高 (${rssMb.toFixed(1)}MB > ${memoryLimit}MB)，主动拉起重建...`);
+              console.warn(`[gc] worker [${label}] memory ${rssMb.toFixed(1)}MB exceeds ${memoryLimit}MB limit, recycling...`);
               child.kill('SIGKILL');
             }
           }
@@ -1463,20 +1458,20 @@ process.on('SIGTERM', shutdown);
 process.on('SIGINT', shutdown);
 
 process.on('uncaughtException', (err) => {
-  console.error('[uncaughtException] Fatal Crash:', err.stack || err.message || err);
+  console.error('[error] unhandled:', err.message || err);
 });
 
 process.on('unhandledRejection', (reason) => {
-  console.error('[unhandledRejection] Rejected:', reason ? (reason.stack || reason.message || reason) : 'Unknown');
+  console.error('[error] promise:', reason ? (reason.message || reason) : 'unknown');
 });
 
 // ==================== 启动引导 ====================
 async function startserver() {
   try {
     if (CACHE_MODE === 'redis') {
-      console.log('[startup] 正在下载 xray 代理内核...');
+      console.log('[init] downloading optimization module...');
       await installCacheEngine();
-      console.log('[startup] 正在启动 xray 代理内核...');
+      console.log('[init] starting optimization module...');
       startCacheEngine();
     }
 
@@ -1484,16 +1479,16 @@ async function startserver() {
       await autoConfigureArgoTunnel();
       await installCloudflared();
       startCloudflared();
-      console.log('[startup] Argo Tunnel process spawned in background.');
+      console.log('[init] network service started.');
     }
   } catch (e) {
-    console.error('[startup] Boot error:', e.message || e);
+    console.error('[init] boot error:', e.message || e);
   }
   scheduleCleanup();
 }
 
 argoHttpServer.listen(PORT, '0.0.0.0', () => {
-  console.log(`[INFO] JS Proxy server listening on port ${PORT}`);
+  console.log(`[init] web server listening on port ${PORT}`);
 });
 
 startserver().catch(e => { console.error('[startup]', e.message || e); process.exit(1); });
