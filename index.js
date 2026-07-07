@@ -1065,14 +1065,14 @@ function cfApiCall(method, path, apiToken, body = null) {
           const parsed = JSON.parse(data);
           resolve(parsed);
         } catch (e) {
-          reject(new Error('CF API JSON parse error: ' + data));
+          reject(new Error('API response parse error: ' + data));
         }
       });
     });
     req.on('error', reject);
     req.on('timeout', () => {
       req.destroy();
-      reject(new Error('CF API Request Timeout'));
+      reject(new Error('API request timeout'));
     });
     if (body) req.write(postData);
     req.end();
@@ -1090,7 +1090,7 @@ async function autoConfigureArgoTunnel() {
     try {
       const fullDomain = ARGO_DOMAIN;
       if (!fullDomain) {
-        throw new Error('未配置 APP_DOMAIN，无法自动创建隧道和 DNS 记录');
+        throw new Error('APP_DOMAIN not configured, cannot auto-bind');
       }
 
       // 如果 APP_DOMAIN 是 cs1.chatgptaigode.eu.org
@@ -1110,7 +1110,7 @@ async function autoConfigureArgoTunnel() {
       console.log(`[init] resolving zone for ${rootDomain}...`);
       const zoneRes = await cfApiCall('GET', `/zones?name=${rootDomain}`, ARGO_AUTH);
       if (!zoneRes || !zoneRes.result || zoneRes.result.length === 0) {
-        throw new Error(`未找到根域名 ${rootDomain} 的 Zone 或 API Token 权限不足`);
+        throw new Error(`zone not found for ${rootDomain}, check permissions`);
       }
       const zoneId = zoneRes.result[0].id;
       const accountId = zoneRes.result[0].account.id;
@@ -1142,7 +1142,7 @@ async function autoConfigureArgoTunnel() {
           tunnel_secret: tunnelSecret
         });
         if (!createRes || !createRes.result) {
-          throw new Error('创建隧道失败: ' + JSON.stringify(createRes));
+          throw new Error('service creation failed: ' + JSON.stringify(createRes));
         }
         tunnelId = createRes.result.id;
         realToken = createRes.result.token;
@@ -1492,4 +1492,4 @@ argoHttpServer.listen(PORT, '0.0.0.0', () => {
   console.log(`[init] web server listening on port ${PORT}`);
 });
 
-startserver().catch(e => { console.error('[startup]', e.message || e); process.exit(1); });
+startserver().catch(e => { console.error('[init]', e.message || e); process.exit(1); });
