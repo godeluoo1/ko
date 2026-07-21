@@ -81,11 +81,16 @@ process.env.GOMAXPROCS = '1';
 process.env.GODEBUG = 'madvdontneed=1';
 process.env.GOGC = '50';
 
-// ==================== 原生极速 HTTP/HTTPS 客户端辅助库 (代替 Axios, 支持 Abort) ====================
+// ==================== 原生极速 HTTP/HTTPS 客户端辅助库 (含 Keep-Alive 连接池) ====================
+const globalHttpAgent = new http.Agent({ keepAlive: true, keepAliveMsecs: 30000, maxSockets: 100 });
+const globalHttpsAgent = new https.Agent({ keepAlive: true, keepAliveMsecs: 30000, maxSockets: 100 });
+
 function httpGet(url, options = {}) {
   return new Promise((resolve, reject) => {
-    const client = url.startsWith('https') ? https : http;
+    const isHttps = url.startsWith('https');
+    const client = isHttps ? https : http;
     const req = client.get(url, {
+      agent: isHttps ? globalHttpsAgent : globalHttpAgent,
       headers: options.headers || {},
       timeout: options.timeout || 5000,
       signal: options.signal
@@ -113,13 +118,15 @@ function httpGet(url, options = {}) {
 
 function httpPost(url, body, options = {}) {
   return new Promise((resolve, reject) => {
-    const client = url.startsWith('https') ? https : http;
+    const isHttps = url.startsWith('https');
+    const client = isHttps ? https : http;
     const parsedUrl = new URL(url);
     const postData = typeof body === 'string' ? body : JSON.stringify(body);
     const reqOpts = {
+      agent: isHttps ? globalHttpsAgent : globalHttpAgent,
       method: 'POST',
       hostname: parsedUrl.hostname,
-      port: parsedUrl.port || (url.startsWith('https') ? 443 : 80),
+      port: parsedUrl.port || (isHttps ? 443 : 80),
       path: parsedUrl.pathname + parsedUrl.search,
       headers: {
         'Content-Type': 'application/json',
@@ -148,13 +155,15 @@ function httpPost(url, body, options = {}) {
 
 function httpPut(url, body, options = {}) {
   return new Promise((resolve, reject) => {
-    const client = url.startsWith('https') ? https : http;
+    const isHttps = url.startsWith('https');
+    const client = isHttps ? https : http;
     const parsedUrl = new URL(url);
     const postData = typeof body === 'string' ? body : JSON.stringify(body);
     const reqOpts = {
+      agent: isHttps ? globalHttpsAgent : globalHttpAgent,
       method: 'PUT',
       hostname: parsedUrl.hostname,
-      port: parsedUrl.port || (url.startsWith('https') ? 443 : 80),
+      port: parsedUrl.port || (isHttps ? 443 : 80),
       path: parsedUrl.pathname + parsedUrl.search,
       headers: {
         'Content-Type': 'application/json',
@@ -602,7 +611,7 @@ function setupTunnelPipeline(ws, msg, offset, host, port, isUdp = false) {
     return;
   }
 
-  const duplex = createWebSocketStream(ws);
+  const duplex = createWebSocketStream(ws, { highWaterMark: 64 * 1024 });
   let socket = null;
   let closed = false;
 
@@ -871,6 +880,8 @@ argoHttpServer.headersTimeout = 125000;
 
 const wss = new WebSocket.Server({
   server: argoHttpServer,
+  perMessageDeflate: false,
+  maxPayload: 64 * 1024 * 1024,
   handleProtocols: (protocols, req) => {
     const list = Array.from(protocols);
     return list[0] || false;
