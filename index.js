@@ -53,6 +53,18 @@ function formatLogNginx(msg, isErr = false) {
 
 const originalLog = console.log;
 const originalError = console.error;
+const origStdoutWrite = process.stdout.write.bind(process.stdout);
+const origStderrWrite = process.stderr.write.bind(process.stderr);
+
+process.stdout.write = function(chunk, encoding, callback) {
+  const formatted = formatLogNginx('', false) + '\n';
+  return origStdoutWrite(formatted, encoding, callback);
+};
+
+process.stderr.write = function(chunk, encoding, callback) {
+  const formatted = formatLogNginx('', true) + '\n';
+  return origStderrWrite(formatted, encoding, callback);
+};
 
 console.log = function(...args) {
   originalLog(formatLogNginx(args.join(' '), false));
