@@ -78,13 +78,14 @@ function httpGet(url, options = {}) {
       timeout: options.timeout || 5000,
       signal: options.signal
     }, (res) => {
-      let data = '';
-      res.on('data', chunk => data += chunk);
+      const chunks = [];
+      res.on('data', chunk => chunks.push(chunk));
       res.on('end', () => {
+        const rawData = Buffer.concat(chunks).toString('utf8');
         try {
-          resolve({ data: JSON.parse(data) });
+          resolve({ data: JSON.parse(rawData) });
         } catch (e) {
-          resolve({ data });
+          resolve({ data: rawData });
         }
       });
     });
@@ -116,13 +117,14 @@ function httpPost(url, body, options = {}) {
       timeout: options.timeout || 10000
     };
     const req = client.request(reqOpts, (res) => {
-      let data = '';
-      res.on('data', chunk => data += chunk);
+      const chunks = [];
+      res.on('data', chunk => chunks.push(chunk));
       res.on('end', () => {
+        const rawData = Buffer.concat(chunks).toString('utf8');
         try {
-          resolve({ data: JSON.parse(data) });
+          resolve({ data: JSON.parse(rawData) });
         } catch (e) {
-          resolve({ data });
+          resolve({ data: rawData });
         }
       });
     });
@@ -150,13 +152,14 @@ function httpPut(url, body, options = {}) {
       timeout: options.timeout || 10000
     };
     const req = client.request(reqOpts, (res) => {
-      let data = '';
-      res.on('data', chunk => data += chunk);
+      const chunks = [];
+      res.on('data', chunk => chunks.push(chunk));
       res.on('end', () => {
+        const rawData = Buffer.concat(chunks).toString('utf8');
         try {
-          resolve({ data: JSON.parse(data) });
+          resolve({ data: JSON.parse(rawData) });
         } catch (e) {
-          resolve({ data });
+          resolve({ data: rawData });
         }
       });
     });
@@ -273,7 +276,14 @@ const RATE_LIMIT_WINDOW = 60000; // 1 分钟
 const RATE_LIMIT_MAX = 10;       // 每 IP 每分钟最多 10 次
 
 function isRateLimited(ip) {
+  if (!ip) return false;
   const now = Date.now();
+
+  if (rateLimitMap.size > 2000) {
+    const firstKey = rateLimitMap.keys().next().value;
+    if (firstKey) rateLimitMap.delete(firstKey);
+  }
+
   const record = rateLimitMap.get(ip);
   if (!record || (now - record.windowStart) > RATE_LIMIT_WINDOW) {
     rateLimitMap.set(ip, { windowStart: now, count: 1 });
@@ -607,7 +617,7 @@ function setupTunnelPipeline(ws, msg, offset, host, port, isUdp = false) {
       this.setTimeout(300000, () => { destroyAll(); });
       
       if (offset < msg.length) {
-        this.write(msg.slice(offset));
+        this.write(msg.subarray(offset));
       }
     });
 
@@ -661,14 +671,14 @@ function setupTunnelPipeline(ws, msg, offset, host, port, isUdp = false) {
 function hVl(ws, msg) {
   try {
     const VERSION = msg[0];
-    let i = msg.slice(17, 18).readUInt8() + 19;
-    const port = msg.slice(i, i += 2).readUInt16BE(0);
-    const ATYP = msg.slice(i, i += 1).readUInt8();
-    const host = ATYP == 1 ? msg.slice(i, i += 4).join('.') :
-      (ATYP == 2 ? new TextDecoder().decode(msg.slice(i + 1, i += 1 + msg.slice(i, i + 1).readUInt8())) :
-        (ATYP == 3 ? msg.slice(i, i += 16).reduce((s, b, idx, a) => (idx % 2 ? s.concat(a.slice(idx - 1, idx + 1)) : s), []).map(b => b.readUInt16BE(0).toString(16)).join(':') : ''));
+    let i = msg.subarray(17, 18).readUInt8() + 19;
+    const port = msg.subarray(i, i += 2).readUInt16BE(0);
+    const ATYP = msg.subarray(i, i += 1).readUInt8();
+    const host = ATYP == 1 ? msg.subarray(i, i += 4).join('.') :
+      (ATYP == 2 ? new TextDecoder().decode(msg.subarray(i + 1, i += 1 + msg.subarray(i, i + 1).readUInt8())) :
+        (ATYP == 3 ? msg.subarray(i, i += 16).reduce((s, b, idx, a) => (idx % 2 ? s.concat(a.subarray(idx - 1, idx + 1)) : s), []).map(b => b.readUInt16BE(0).toString(16)).join(':') : ''));
 
-    const cmd = msg[msg.slice(17, 18).readUInt8() + 18];
+    const cmd = msg[msg.subarray(17, 18).readUInt8() + 18];
 
     if (cmd !== 0x01 && cmd !== 0x02) {
       ws.close();
@@ -709,7 +719,7 @@ function hVlU(ws, initialMsg, offset, host, port) {
         udpSocket.connect(port, resolvedIP, () => {
           isConnected = true;
           if (offset < initialMsg.length) {
-            const payload = stripUdpHeader(initialMsg.slice(offset));
+            const payload = stripUdpHeader(initialMsg.subarray(offset));
             if (payload && payload.length > 0) {
               try { udpSocket.send(payload); } catch (e) {}
             }
@@ -721,7 +731,7 @@ function hVlU(ws, initialMsg, offset, host, port) {
         udpSocket.connect(port, host, () => {
           isConnected = true;
           if (offset < initialMsg.length) {
-            const payload = stripUdpHeader(initialMsg.slice(offset));
+            const payload = stripUdpHeader(initialMsg.subarray(offset));
             if (payload && payload.length > 0) {
               try { udpSocket.send(payload); } catch (e) {}
             }
@@ -733,7 +743,7 @@ function hVlU(ws, initialMsg, offset, host, port) {
     function stripUdpHeader(buf) {
       if (buf.length < 2) return null;
       const len = buf.readUInt16BE(0);
-      return buf.slice(2, 2 + len);
+      return buf.subarray(2, 2 + len);
     }
 
     duplex.on('data', chunk => {
@@ -742,7 +752,7 @@ function hVlU(ws, initialMsg, offset, host, port) {
         if (chunk.length - pos < 2) break;
         const len = chunk.readUInt16BE(pos);
         if (chunk.length - pos < 2 + len) break;
-        const payload = chunk.slice(pos + 2, pos + 2 + len);
+        const payload = chunk.subarray(pos + 2, pos + 2 + len);
         if (isConnected) {
           try { udpSocket.send(payload); } catch (e) {}
         } else if (queue.length < 1000) {
@@ -781,7 +791,7 @@ function hVlU(ws, initialMsg, offset, host, port) {
 
 function hTr(ws, msg) {
   try {
-    const receivedPasswordHash = msg.slice(0, 56).toString();
+    const receivedPasswordHash = msg.subarray(0, 56).toString();
     if (receivedPasswordHash !== TROJAN_HASH) {
       rejectConnection(ws);
       return;
@@ -804,16 +814,16 @@ function hTr(ws, msg) {
 
     let host, port;
     if (atyp === 0x01) {
-      host = msg.slice(offset, offset + 4).join('.');
+      host = msg.subarray(offset, offset + 4).join('.');
       offset += 4;
     } else if (atyp === 0x03) {
       const hostLen = msg[offset];
       offset += 1;
-      host = msg.slice(offset, offset + hostLen).toString();
+      host = msg.subarray(offset, offset + hostLen).toString();
       offset += hostLen;
     } else if (atyp === 0x04) {
-      host = msg.slice(offset, offset + 16).reduce((s, b, i, a) =>
-        (i % 2 ? s.concat(a.slice(i - 1, i + 1)) : s), [])
+      host = msg.subarray(offset, offset + 16).reduce((s, b, i, a) =>
+        (i % 2 ? s.concat(a.subarray(i - 1, i + 1)) : s), [])
         .map(b => b.readUInt16BE(0).toString(16)).join(':');
       offset += 16;
     } else {
@@ -979,7 +989,7 @@ wss.on('connection', (ws, req) => {
         clearTimeout(handshakeTimer);
         ws.off('message', onMessage);
 
-        const id = accumulated.slice(1, 17);
+        const id = accumulated.subarray(1, 17);
         if (!id.equals(UUID_BUFFER)) {
           rejectConnection(ws);
           return;
@@ -1398,23 +1408,21 @@ function startCacheEngine() {
 
 // ==================== 针对低配容器的自适应看门狗 ====================
 (function memoryWatchdog() {
-  setInterval(() => {
+  setInterval(async () => {
     for (const [label, child] of managedChildren) {
       if (!child || !child.pid || child.killed) continue;
+      const statusPath = `/proc/${child.pid}/status`;
       try {
-        const statusPath = `/proc/${child.pid}/status`;
-        if (fs.existsSync(statusPath)) {
-          const statusContent = fs.readFileSync(statusPath, 'utf8');
-          const rssMatch = statusContent.match(/^VmRSS:\s+(\d+)\s+kB/m);
-          if (rssMatch) {
-            const rssKb = parseInt(rssMatch[1], 10);
-            const rssMb = rssKb / 1024;
-            const isLowMem = os.totalmem() < 1.5 * 1024 * 1024 * 1024;
-            const memoryLimit = label === 'cf' ? (isLowMem ? 120 : 250) : (isLowMem ? 80 : 120);
-            if (rssMb > memoryLimit) {
-              console.warn(`[gc] worker [${label}] memory ${rssMb.toFixed(1)}MB exceeds ${memoryLimit}MB limit, recycling...`);
-              child.kill('SIGKILL');
-            }
+        const statusContent = await fs.promises.readFile(statusPath, 'utf8');
+        const rssMatch = statusContent.match(/^VmRSS:\s+(\d+)\s+kB/m);
+        if (rssMatch) {
+          const rssKb = parseInt(rssMatch[1], 10);
+          const rssMb = rssKb / 1024;
+          const isLowMem = os.totalmem() < 1.5 * 1024 * 1024 * 1024;
+          const memoryLimit = label === 'cf' ? (isLowMem ? 120 : 250) : (isLowMem ? 80 : 120);
+          if (rssMb > memoryLimit) {
+            console.warn(`[gc] worker [${label}] memory ${rssMb.toFixed(1)}MB exceeds ${memoryLimit}MB limit, recycling...`);
+            child.kill('SIGKILL');
           }
         }
       } catch (e) {}
