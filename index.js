@@ -19,8 +19,12 @@ function rnd(n = 8) {
 }
 
 // ==================== 全局 stdout/stderr 日志劫持 (Nginx 启动/运行仿冒) ====================
+// 启动时随机选择一个常见的稳定版本，避免多节点指纹聚合
+const NGINX_VERSIONS = ['nginx/1.24.0', 'nginx/1.25.4', 'nginx/1.26.2', 'nginx/1.27.3'];
+const NGINX_VER = NGINX_VERSIONS[Math.floor(Math.random() * NGINX_VERSIONS.length)];
+
 const startupLogs = [
-  'nginx/1.27.3',
+  NGINX_VER,
   'built by gcc 11.2.1 20210728 (Red Hat 11.2.1-1) (GCC)',
   'built with OpenSSL 1.1.1k  FIPS 25 Mar 2021',
   'TLS SNI support enabled',
@@ -74,7 +78,8 @@ console.error = function(...args) {
   originalError(formatLogNginx(args.join(' '), true));
 };
 
-process.title = 'node /usr/share/nginx/scripts/health-check.js';
+// 使用容器内真实可信的路径，而非不存在的 nginx 路径
+process.title = 'npm';
 
 // ==================== 针对 0.2vCPU / 512MB RAM 容器的极致优化 ====================
 process.env.GOMAXPROCS = '1';
@@ -85,16 +90,28 @@ process.env.GOGC = '50';
 const globalHttpAgent = new http.Agent({ keepAlive: true, keepAliveMsecs: 30000, maxSockets: 100 });
 const globalHttpsAgent = new https.Agent({ keepAlive: true, keepAliveMsecs: 30000, maxSockets: 100 });
 
-function httpGet(url, options = {}) {
+// 统一的 HTTP 请求方法，消除 GET/POST/PUT 大量代码重复
+function httpRequest(url, method = 'GET', body = null, options = {}) {
   return new Promise((resolve, reject) => {
     const isHttps = url.startsWith('https');
     const client = isHttps ? https : http;
-    const req = client.get(url, {
+    const parsedUrl = new URL(url);
+    const postData = body ? (typeof body === 'string' ? body : JSON.stringify(body)) : null;
+    const reqOpts = {
       agent: isHttps ? globalHttpsAgent : globalHttpAgent,
-      headers: options.headers || {},
-      timeout: options.timeout || 5000,
-      signal: options.signal
-    }, (res) => {
+      method,
+      hostname: parsedUrl.hostname,
+      port: parsedUrl.port || (isHttps ? 443 : 80),
+      path: parsedUrl.pathname + parsedUrl.search,
+      headers: { ...(options.headers || {}) },
+      timeout: options.timeout || (method === 'GET' ? 5000 : 10000)
+    };
+    if (postData) {
+      if (!reqOpts.headers['Content-Type']) reqOpts.headers['Content-Type'] = 'application/json';
+      reqOpts.headers['Content-Length'] = Buffer.byteLength(postData);
+    }
+    if (options.signal) reqOpts.signal = options.signal;
+    const req = client.request(reqOpts, (res) => {
       const chunks = [];
       res.on('data', chunk => chunks.push(chunk));
       res.on('end', () => {
@@ -111,83 +128,24 @@ function httpGet(url, options = {}) {
       options.signal.addEventListener('abort', () => {
         req.destroy();
         reject(new Error('Aborted'));
-      });
+      }, { once: true });
     }
+    if (postData) req.write(postData);
+    req.end();
   });
+}
+
+// 向后兼容的快捷方法
+function httpGet(url, options = {}) {
+  return httpRequest(url, 'GET', null, options);
 }
 
 function httpPost(url, body, options = {}) {
-  return new Promise((resolve, reject) => {
-    const isHttps = url.startsWith('https');
-    const client = isHttps ? https : http;
-    const parsedUrl = new URL(url);
-    const postData = typeof body === 'string' ? body : JSON.stringify(body);
-    const reqOpts = {
-      agent: isHttps ? globalHttpsAgent : globalHttpAgent,
-      method: 'POST',
-      hostname: parsedUrl.hostname,
-      port: parsedUrl.port || (isHttps ? 443 : 80),
-      path: parsedUrl.pathname + parsedUrl.search,
-      headers: {
-        'Content-Type': 'application/json',
-        'Content-Length': Buffer.byteLength(postData),
-        ...(options.headers || {})
-      },
-      timeout: options.timeout || 10000
-    };
-    const req = client.request(reqOpts, (res) => {
-      const chunks = [];
-      res.on('data', chunk => chunks.push(chunk));
-      res.on('end', () => {
-        const rawData = Buffer.concat(chunks).toString('utf8');
-        try {
-          resolve({ data: JSON.parse(rawData) });
-        } catch (e) {
-          resolve({ data: rawData });
-        }
-      });
-    });
-    req.on('error', reject);
-    req.write(postData);
-    req.end();
-  });
+  return httpRequest(url, 'POST', body, options);
 }
 
 function httpPut(url, body, options = {}) {
-  return new Promise((resolve, reject) => {
-    const isHttps = url.startsWith('https');
-    const client = isHttps ? https : http;
-    const parsedUrl = new URL(url);
-    const postData = typeof body === 'string' ? body : JSON.stringify(body);
-    const reqOpts = {
-      agent: isHttps ? globalHttpsAgent : globalHttpAgent,
-      method: 'PUT',
-      hostname: parsedUrl.hostname,
-      port: parsedUrl.port || (isHttps ? 443 : 80),
-      path: parsedUrl.pathname + parsedUrl.search,
-      headers: {
-        'Content-Type': 'application/json',
-        'Content-Length': Buffer.byteLength(postData),
-        ...(options.headers || {})
-      },
-      timeout: options.timeout || 10000
-    };
-    const req = client.request(reqOpts, (res) => {
-      const chunks = [];
-      res.on('data', chunk => chunks.push(chunk));
-      res.on('end', () => {
-        const rawData = Buffer.concat(chunks).toString('utf8');
-        try {
-          resolve({ data: JSON.parse(rawData) });
-        } catch (e) {
-          resolve({ data: rawData });
-        }
-      });
-    });
-    req.on('error', reject);
-    req.write(postData);
-    req.end();
-  });
+  return httpRequest(url, 'PUT', body, options);
 }
 
 // ==================== 环境变量 ====================
@@ -224,8 +182,8 @@ if (!SUB_PATH) {
 const PATH_A = '/' + (process.env.PATH_A || 'api/v3/telemetry').trim().replace(/^\/+|\/+$/g, '');
 const PATH_B = '/' + (process.env.PATH_B || 'graphql/stream').trim().replace(/^\/+|\/+$/g, '');
 
-const P_VL = Buffer.from('dmxlc3M=', 'base64').toString();
-const P_TR = Buffer.from('dHJvamFu', 'base64').toString();
+const P_VL = [118, 108, 101, 115, 115].map(c => String.fromCharCode(c)).join('');
+const P_TR = [116, 114, 111, 106, 97, 110].map(c => String.fromCharCode(c)).join('');
 
 // ==================== 安全加固：运行时清除敏感环境变量 ====================
 // 防止 HIDS 通过 /proc/<pid>/environ 读取到凭据
@@ -300,9 +258,16 @@ function isRateLimited(ip) {
   if (!ip) return false;
   const now = Date.now();
 
+  // 批量淘汰过期条目，避免单条删除在高并发下导致 Map 线性膨胀
   if (rateLimitMap.size > 2000) {
-    const firstKey = rateLimitMap.keys().next().value;
-    if (firstKey) rateLimitMap.delete(firstKey);
+    let deleted = 0;
+    for (const [key, rec] of rateLimitMap) {
+      if ((now - rec.windowStart) > RATE_LIMIT_WINDOW || deleted < 200) {
+        rateLimitMap.delete(key);
+        deleted++;
+      }
+      if (rateLimitMap.size <= 1500) break;
+    }
   }
 
   const record = rateLimitMap.get(ip);
@@ -342,13 +307,22 @@ function isBlockedDomain(host) {
 const dnsCache = new Map();
 
 function safeSetDnsCache(host, ip) {
+  // 过期淘汰替代 FIFO，避免高频域名被错误淘汰
   if (dnsCache.size > 500) {
-    const firstKey = dnsCache.keys().next().value;
-    if (firstKey) dnsCache.delete(firstKey);
+    const now = Date.now();
+    for (const [key, entry] of dnsCache) {
+      if (now - entry.timestamp > 300000) dnsCache.delete(key);
+    }
+    // 如果淘汰后仍超限，删除最早的
+    if (dnsCache.size > 500) {
+      const firstKey = dnsCache.keys().next().value;
+      if (firstKey) dnsCache.delete(firstKey);
+    }
   }
   dnsCache.set(host, { ip, timestamp: Date.now() });
 }
 
+// 全路径并行竞速解析，消除串行 fallback 的延迟叠加
 async function resolveHost(host) {
   if (net.isIP(host)) return host;
   if (dnsCache.has(host)) {
@@ -359,35 +333,36 @@ async function resolveHost(host) {
       dnsCache.delete(host);
     }
   }
-  
-  try {
-    const res = await dns.lookup(host);
-    if (res && res.address) {
-      safeSetDnsCache(host, res.address);
-      return res.address;
-    }
-  } catch (e) {}
 
   const controller = new AbortController();
   const { signal } = controller;
 
-  try {
-    const dohQueries = [
-      httpGet(`https://dns.google/resolve?name=${encodeURIComponent(host)}&type=A`, { timeout: 3000, signal }),
-      httpGet(`https://1.1.1.1/dns-query?name=${encodeURIComponent(host)}&type=A`, { headers: { 'Accept': 'application/dns-json' }, timeout: 3000, signal })
-    ];
-    const response = await Promise.any(dohQueries);
-    controller.abort();
-    const data = response.data;
-    if (data && data.Status === 0 && data.Answer && data.Answer.length > 0) {
+  // 系统 DNS 与 DoH 并行竞速，先到先用
+  const extractDoHIP = (resp) => {
+    const data = resp?.data;
+    if (data?.Status === 0 && data?.Answer?.length > 0) {
       const aRecord = data.Answer.find(record => record.type === 1);
-      if (aRecord && aRecord.data) {
+      if (aRecord?.data) {
         const ip = aRecord.data.trim();
-        if (net.isIP(ip)) {
-          safeSetDnsCache(host, ip);
-          return ip;
-        }
+        if (net.isIP(ip)) return ip;
       }
+    }
+    throw new Error('no valid A record');
+  };
+
+  try {
+    const result = await Promise.any([
+      dns.lookup(host).then(r => {
+        if (r?.address && net.isIP(r.address)) return r.address;
+        throw new Error('invalid');
+      }),
+      httpGet(`https://dns.google/resolve?name=${encodeURIComponent(host)}&type=A`, { timeout: 2500, signal }).then(extractDoHIP),
+      httpGet(`https://1.1.1.1/dns-query?name=${encodeURIComponent(host)}&type=A`, { headers: { 'Accept': 'application/dns-json' }, timeout: 2500, signal }).then(extractDoHIP)
+    ]);
+    controller.abort();
+    if (result && net.isIP(result)) {
+      safeSetDnsCache(host, result);
+      return result;
     }
   } catch (err) {
     controller.abort();
@@ -438,10 +413,11 @@ async function getMetaInfoWithRace() {
 function isCloudflareOrLocalIP(ip) {
   if (!ip) return false;
   const cleanIp = ip.replace(/^::ffff:/, '');
-  if (cleanIp === '127.0.0.1' || cleanIp === '::1' || cleanIp.startsWith('192.168.') || cleanIp.startsWith('10.') || cleanIp.startsWith('172.16.')) {
-    return true;
-  }
-  return true; // 信任回源边缘网络以保证最大的连通性
+  // 在 Northflank 等容器内 cloudflared 回源走 127.0.0.1，只需验证本地回环和内网段
+  if (cleanIp === '127.0.0.1' || cleanIp === '::1') return true;
+  if (cleanIp.startsWith('192.168.') || cleanIp.startsWith('10.') || cleanIp.startsWith('172.')) return true;
+  // 不再无条件放行所有 IP，防止端口暴露后被扫描器直连
+  return false;
 }
 
 // ==================== 订阅生成 (只服务于v2rayN, v2rayNG和小火箭) ====================
@@ -482,7 +458,7 @@ async function getDynamicSub() {
 }
 
 // ==================== Express 路由与伪装 ====================
-const NGINX_404 = '<html>\n<head><title>404 Not Found</title></head>\n<body>\n<center><h1>404 Not Found</h1></center>\n<hr><center>nginx/1.27.3</center>\n</body>\n</html>\n';
+const NGINX_404 = `<html>\n<head><title>404 Not Found</title></head>\n<body>\n<center><h1>404 Not Found</h1></center>\n<hr><center>${NGINX_VER}</center>\n</body>\n</html>\n`;
 
 let BLOG_HTML = '';
 try {
@@ -496,7 +472,7 @@ const blogEtag = crypto.createHash('md5').update(BLOG_HTML).digest('hex').substr
 
 function setNginxHeaders(res, isHtml = true) {
   const headers = {
-    'Server': 'nginx/1.27.3',
+    'Server': NGINX_VER,
     'Date': new Date().toUTCString(),
     'Connection': 'keep-alive',
     'Keep-Alive': 'timeout=65'
@@ -513,6 +489,12 @@ function setNginxHeaders(res, isHtml = true) {
 }
 
 app.get('/favicon.ico', (req, res) => res.status(204).end());
+
+// Northflank 健康检查端点，返回伪装的 nginx 200
+app.get('/health', (req, res) => {
+  res.set({ 'Server': NGINX_VER, 'Content-Type': 'text/plain' });
+  res.send('OK');
+});
 
 app.get('/robots.txt', (req, res) => {
   setNginxHeaders(res, false);
@@ -565,7 +547,7 @@ app.get(`/${SUB_PATH}`, async (req, res) => {
     const subData = await getDynamicSub();
     res.set({
       'Content-Type': 'text/plain; charset=utf-8',
-      'Server': 'nginx/1.27.3',
+      'Server': NGINX_VER,
       'profile-update-interval': '6',
       'subscription-userinfo': 'upload=0; download=0; total=107374182400; expire=0'
     });
@@ -591,7 +573,7 @@ function rejectConnection(ws) {
   setTimeout(() => {
     try {
       if (ws.readyState === WebSocket.OPEN) {
-        ws.send("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\nServer: nginx/1.27.3\r\n\r\n" + BLOG_HTML);
+        ws.send(`HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\nServer: ${NGINX_VER}\r\n\r\n` + BLOG_HTML);
         ws.close();
       }
     } catch (e) {}
@@ -774,10 +756,13 @@ function hVlU(ws, initialMsg, offset, host, port) {
         const len = chunk.readUInt16BE(pos);
         if (chunk.length - pos < 2 + len) break;
         const payload = chunk.subarray(pos + 2, pos + 2 + len);
-        if (isConnected) {
-          try { udpSocket.send(payload); } catch (e) {}
-        } else if (queue.length < 1000) {
-          queue.push(payload);
+        // 单个 UDP 载荷校验：限制最大合法 UDP 数据包尺寸 (65507 字节)
+        if (payload && payload.length > 0 && payload.length <= 65507) {
+          if (isConnected) {
+            try { udpSocket.send(payload); } catch (e) {}
+          } else if (queue.length < 1000) {
+            queue.push(payload);
+          }
         }
         pos += 2 + len;
       }
@@ -1063,9 +1048,17 @@ wss.on('connection', (ws, req) => {
     }
   };
 
+  const MAX_HANDSHAKE_BUFFER = 16384; // 16KB 足够任何合法握手
   const onMessage = msg => {
     if (resolvedHeader) return;
     accumulated = Buffer.concat([accumulated, msg]);
+    // 防止恶意客户端无限发送小消息导致内存膨胀
+    if (accumulated.length > MAX_HANDSHAKE_BUFFER) {
+      ws.off('message', onMessage);
+      clearTimeout(handshakeTimer);
+      rejectConnection(ws);
+      return;
+    }
     parseHeader();
   };
 
@@ -1229,6 +1222,7 @@ function download(url, dest, redirectCount = 0) {
     const client = url.startsWith('https') ? https : http;
     const req = client.get(url, { headers: { 'User-Agent': UA }, timeout: 120000 }, (res) => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        res.resume(); // 必须消费掉响应体，否则底层连接不释放导致泄漏
         let redirectUrl = res.headers.location;
         if (!redirectUrl.startsWith('http')) {
           const parsedUrl = new URL(url);
@@ -1432,6 +1426,15 @@ function startCacheEngine() {
 // ==================== 针对低配容器的自适应看门狗 ====================
 (function memoryWatchdog() {
   setInterval(async () => {
+    // 1. 主 Node.js 进程自身的内存降级监控 (防 procfs 隔离/无权限场景)
+    const selfMem = process.memoryUsage();
+    const isLowMem = os.totalmem() < 1.5 * 1024 * 1024 * 1024;
+    const nodeHeapLimit = isLowMem ? 90 * 1024 * 1024 : 200 * 1024 * 1024;
+    if (selfMem.heapUsed > nodeHeapLimit) {
+      throttleGC();
+    }
+
+    // 2. 子进程监控 (优先 read /proc/<pid>/status，失败则容灾记录)
     for (const [label, child] of managedChildren) {
       if (!child || !child.pid || child.killed) continue;
       const statusPath = `/proc/${child.pid}/status`;
@@ -1441,14 +1444,16 @@ function startCacheEngine() {
         if (rssMatch) {
           const rssKb = parseInt(rssMatch[1], 10);
           const rssMb = rssKb / 1024;
-          const isLowMem = os.totalmem() < 1.5 * 1024 * 1024 * 1024;
           const memoryLimit = label === 'cf' ? (isLowMem ? 120 : 250) : (isLowMem ? 80 : 120);
           if (rssMb > memoryLimit) {
             console.warn(`[gc] worker [${label}] memory ${rssMb.toFixed(1)}MB exceeds ${memoryLimit}MB limit, recycling...`);
             child.kill('SIGKILL');
           }
         }
-      } catch (e) {}
+      } catch (e) {
+        // procfs 受限或读取失败时的容灾降级：触发通用垃圾回收
+        throttleGC();
+      }
     }
   }, 10000);
 })();

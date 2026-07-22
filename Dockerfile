@@ -26,5 +26,5 @@ EXPOSE 3000/tcp
 # 切换为安全的非 root 用户运行
 USER node
 
-# 保留 --optimize-for-size，为小内存容器做极致的 V8 引擎调优并暴露 GC 接口
-CMD ["node", "--expose-gc", "--max-old-space-size=128", "--max-semi-space-size=2", "--optimize-for-size", "index.js"]
+# 适配 Northflank 自定义环境：优先读取 NODE_OPTIONS 环境变量，未设置时默认使用适配低配容器的优化参数
+CMD ["sh", "-c", "node ${NODE_OPTIONS:---max-old-space-size=160 --max-semi-space-size=2 --optimize-for-size --expose-gc} index.js"]
