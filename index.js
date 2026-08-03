@@ -857,23 +857,32 @@ const argoHttpServer = http.createServer((req, res) => {
     res.writeHead(302, { 'Location': '/' });
     res.end();
   } else if (CACHE_MODE === 'redis' && [PATH_C, PATH_D].includes(urlPath)) {
-    const proxyReq = http.request({
-      hostname: '127.0.0.1',
-      port: ARGO_PORT,
-      path: req.url,
-      method: req.method,
-      headers: req.headers
-    }, (proxyRes) => {
-      res.writeHead(proxyRes.statusCode, proxyRes.headers);
-      proxyRes.pipe(res);
-    });
-    proxyReq.on('error', () => {
-      if (!res.headersSent) {
-        res.writeHead(502);
-        res.end('gateway error');
+    // 使用 Raw TCP 双向套接字透传，确保 gRPC / SplitHTTP 的全双工流与二进制帧无损到达 Xray
+    const targetSocket = net.connect(ARGO_PORT, '127.0.0.1', () => {
+      let rawHeader = `${req.method} ${req.url} HTTP/${req.httpVersion}\r\n`;
+      for (let i = 0; i < req.rawHeaders.length; i += 2) {
+        rawHeader += `${req.rawHeaders[i]}: ${req.rawHeaders[i+1]}\r\n`;
+      }
+      rawHeader += '\r\n';
+      
+      targetSocket.write(rawHeader);
+      req.pipe(targetSocket);
+      if (res.socket) {
+        targetSocket.pipe(res.socket);
+      } else {
+        targetSocket.pipe(res);
       }
     });
-    req.pipe(proxyReq);
+
+    targetSocket.on('error', () => {
+      if (!res.headersSent) {
+        try {
+          res.writeHead(502);
+          res.end('gateway error');
+        } catch (e) {}
+      }
+    });
+    req.on('error', () => targetSocket.destroy());
   } else {
     app(req, res);
   }
