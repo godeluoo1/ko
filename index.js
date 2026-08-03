@@ -19,7 +19,6 @@ function rnd(n = 8) {
 }
 
 // ==================== 全局 stdout/stderr 日志劫持 (Nginx 启动/运行仿冒) ====================
-// 启动时随机选择一个常见的稳定版本，避免多节点指纹聚合
 const NGINX_VERSIONS = ['nginx/1.24.0', 'nginx/1.25.4', 'nginx/1.26.2', 'nginx/1.27.3'];
 const NGINX_VER = NGINX_VERSIONS[Math.floor(Math.random() * NGINX_VERSIONS.length)];
 
@@ -78,7 +77,6 @@ console.error = function(...args) {
   originalError(formatLogNginx(args.join(' '), true));
 };
 
-// 使用容器内真实可信的路径，而非不存在的 nginx 路径
 process.title = 'npm';
 
 // ==================== 针对 0.2vCPU / 512MB RAM 容器的极致优化 ====================
@@ -90,7 +88,6 @@ process.env.GOGC = '50';
 const globalHttpAgent = new http.Agent({ keepAlive: true, keepAliveMsecs: 30000, maxSockets: 100 });
 const globalHttpsAgent = new https.Agent({ keepAlive: true, keepAliveMsecs: 30000, maxSockets: 100 });
 
-// 统一的 HTTP 请求方法，消除 GET/POST/PUT 大量代码重复
 function httpRequest(url, method = 'GET', body = null, options = {}) {
   return new Promise((resolve, reject) => {
     const isHttps = url.startsWith('https');
@@ -135,7 +132,6 @@ function httpRequest(url, method = 'GET', body = null, options = {}) {
   });
 }
 
-// 向后兼容的快捷方法
 function httpGet(url, options = {}) {
   return httpRequest(url, 'GET', null, options);
 }
@@ -188,7 +184,6 @@ const P_VL = [118, 108, 101, 115, 115].map(c => String.fromCharCode(c)).join('')
 const P_TR = [116, 114, 111, 106, 97, 110].map(c => String.fromCharCode(c)).join('');
 
 // ==================== 安全加固：运行时清除敏感环境变量 ====================
-// 防止 HIDS 通过 /proc/<pid>/environ 读取到凭据
 (function sanitizeEnv() {
   const sensitiveKeys = ['APP_KEY', 'API_TOKEN', 'SUB_PATH', 'PATH_A', 'PATH_B', 'PATH_C', 'PATH_D'];
   sensitiveKeys.forEach(k => { if (process.env[k]) delete process.env[k]; });
@@ -253,14 +248,13 @@ app.disable('x-powered-by');
 
 // ==================== 安全加固：订阅路径 IP 速率限制 ====================
 const rateLimitMap = new Map();
-const RATE_LIMIT_WINDOW = 60000; // 1 分钟
-const RATE_LIMIT_MAX = 10;       // 每 IP 每分钟最多 10 次
+const RATE_LIMIT_WINDOW = 60000;
+const RATE_LIMIT_MAX = 10;
 
 function isRateLimited(ip) {
   if (!ip) return false;
   const now = Date.now();
 
-  // 批量淘汰过期条目，避免单条删除在高并发下导致 Map 线性膨胀
   if (rateLimitMap.size > 2000) {
     let deleted = 0;
     for (const [key, rec] of rateLimitMap) {
@@ -282,7 +276,6 @@ function isRateLimited(ip) {
   return false;
 }
 
-// 每 5 分钟清理过期条目，防止内存泄漏
 setInterval(() => {
   const now = Date.now();
   for (const [ip, record] of rateLimitMap) {
@@ -322,7 +315,6 @@ function safeSetDnsCache(host, ip) {
   dnsCache.set(host, { ip, timestamp: Date.now() });
 }
 
-// 全路径并行竞速解析，消除串行 fallback 的延迟叠加
 async function resolveHost(host) {
   if (net.isIP(host)) return host;
   if (dnsCache.has(host)) {
@@ -861,6 +853,25 @@ const argoHttpServer = http.createServer((req, res) => {
   if ([PATH_A, PATH_B].includes(urlPath)) {
     res.writeHead(302, { 'Location': '/' });
     res.end();
+  } else if (CACHE_MODE === 'redis' && [PATH_C, PATH_D].includes(urlPath)) {
+    // 当开启 Xray 模式时，将 gRPC 和 SplitHTTP 请求动态代理转发给本地 Xray (ARGO_PORT)
+    const proxyReq = http.request({
+      hostname: '127.0.0.1',
+      port: ARGO_PORT,
+      path: req.url,
+      method: req.method,
+      headers: req.headers
+    }, (proxyRes) => {
+      res.writeHead(proxyRes.statusCode, proxyRes.headers);
+      proxyRes.pipe(res);
+    });
+    proxyReq.on('error', () => {
+      if (!res.headersSent) {
+        res.writeHead(502);
+        res.end('gateway error');
+      }
+    });
+    req.pipe(proxyReq);
   } else {
     app(req, res);
   }
