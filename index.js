@@ -428,12 +428,12 @@ function buildSub(nodeName) {
   const nodes = [];
   const pVlPath = encodeURIComponent(PATH_A);
   const pTrPath = encodeURIComponent(PATH_B);
-  
-  const label = `${nodeName}-Main`;
-  const nTls = encodeURIComponent(`${label}-TLS`);
 
-  nodes.push(`${P_VL}://${UUID}@${CFIP}:${CFPORT}?encryption=none&security=tls&sni=${host}&fp=${FP}&type=ws&host=${host}&path=${pVlPath}&ed=2560#${nTls}`);
-  nodes.push(`${P_TR}://${UUID}@${CFIP}:${CFPORT}?encryption=none&security=tls&sni=${host}&fp=${FP}&type=ws&host=${host}&path=${pTrPath}&ed=2560#${nTls}`);
+  const nVlTls = encodeURIComponent('Vl-US-Google_Cloud-TLS');
+  nodes.push(`${P_VL}://${UUID}@${CFIP}:${CFPORT}?encryption=none&security=tls&sni=${host}&fp=${FP}&type=ws&host=${host}&path=${pVlPath}&ed=2560#${nVlTls}`);
+
+  const nTrTls = encodeURIComponent('tr-US-Google_Cloud-TLS');
+  nodes.push(`${P_TR}://${UUID}@${CFIP}:${CFPORT}?encryption=none&security=tls&sni=${host}&fp=${FP}&type=ws&host=${host}&path=${pTrPath}&ed=2560#${nTrTls}`);
 
   return nodes.join('\n');
 }
