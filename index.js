@@ -181,6 +181,8 @@ if (!SUB_PATH) {
 
 const PATH_A = '/' + (process.env.PATH_A || 'api/v3/telemetry').trim().replace(/^\/+|\/+$/g, '');
 const PATH_B = '/' + (process.env.PATH_B || 'graphql/stream').trim().replace(/^\/+|\/+$/g, '');
+const PATH_C = '/' + (process.env.PATH_C || 'api/v4/grpc').trim().replace(/^\/+|\/+$/g, '');
+const PATH_D = '/' + (process.env.PATH_D || 'api/v4/splithttp').trim().replace(/^\/+|\/+$/g, '');
 
 const P_VL = [118, 108, 101, 115, 115].map(c => String.fromCharCode(c)).join('');
 const P_TR = [116, 114, 111, 106, 97, 110].map(c => String.fromCharCode(c)).join('');
@@ -188,7 +190,7 @@ const P_TR = [116, 114, 111, 106, 97, 110].map(c => String.fromCharCode(c)).join
 // ==================== 安全加固：运行时清除敏感环境变量 ====================
 // 防止 HIDS 通过 /proc/<pid>/environ 读取到凭据
 (function sanitizeEnv() {
-  const sensitiveKeys = ['APP_KEY', 'API_TOKEN', 'SUB_PATH', 'PATH_A', 'PATH_B'];
+  const sensitiveKeys = ['APP_KEY', 'API_TOKEN', 'SUB_PATH', 'PATH_A', 'PATH_B', 'PATH_C', 'PATH_D'];
   sensitiveKeys.forEach(k => { if (process.env[k]) delete process.env[k]; });
 })();
 
@@ -307,13 +309,11 @@ function isBlockedDomain(host) {
 const dnsCache = new Map();
 
 function safeSetDnsCache(host, ip) {
-  // 过期淘汰替代 FIFO，避免高频域名被错误淘汰
   if (dnsCache.size > 500) {
     const now = Date.now();
     for (const [key, entry] of dnsCache) {
       if (now - entry.timestamp > 300000) dnsCache.delete(key);
     }
-    // 如果淘汰后仍超限，删除最早的
     if (dnsCache.size > 500) {
       const firstKey = dnsCache.keys().next().value;
       if (firstKey) dnsCache.delete(firstKey);
@@ -337,7 +337,6 @@ async function resolveHost(host) {
   const controller = new AbortController();
   const { signal } = controller;
 
-  // 系统 DNS 与 DoH 并行竞速，先到先用
   const extractDoHIP = (resp) => {
     const data = resp?.data;
     if (data?.Status === 0 && data?.Answer?.length > 0) {
@@ -413,10 +412,8 @@ async function getMetaInfoWithRace() {
 function isCloudflareOrLocalIP(ip) {
   if (!ip) return false;
   const cleanIp = ip.replace(/^::ffff:/, '');
-  // 在 Northflank 等容器内 cloudflared 回源走 127.0.0.1，只需验证本地回环和内网段
   if (cleanIp === '127.0.0.1' || cleanIp === '::1') return true;
   if (cleanIp.startsWith('192.168.') || cleanIp.startsWith('10.') || cleanIp.startsWith('172.')) return true;
-  // 不再无条件放行所有 IP，防止端口暴露后被扫描器直连
   return false;
 }
 
@@ -434,6 +431,17 @@ function buildSub(nodeName) {
 
   nodes.push(`${P_VL}://${UUID}@${CFIP}:${CFPORT}?encryption=none&security=tls&sni=${host}&fp=${FP}&type=ws&host=${host}&path=${pVlPath}&ed=2560#${nTls}`);
   nodes.push(`${P_TR}://${UUID}@${CFIP}:${CFPORT}?encryption=none&security=tls&sni=${host}&fp=${FP}&type=ws&host=${host}&path=${pTrPath}&ed=2560#${nTls}`);
+
+  if (CACHE_MODE === 'redis') {
+    const pGrpcService = encodeURIComponent(PATH_C.replace(/^\//, ''));
+    const pSplitPath = encodeURIComponent(PATH_D);
+
+    const nGrpc = encodeURIComponent(`${label}-VLESS-gRPC`);
+    const nSplit = encodeURIComponent(`${label}-VLESS-XHTTP`);
+
+    nodes.push(`${P_VL}://${UUID}@${CFIP}:${CFPORT}?encryption=none&security=tls&sni=${host}&fp=${FP}&type=grpc&serviceName=${pGrpcService}&mode=gun#${nGrpc}`);
+    nodes.push(`${P_VL}://${UUID}@${CFIP}:${CFPORT}?encryption=none&security=tls&sni=${host}&fp=${FP}&type=splithttp&host=${host}&path=${pSplitPath}&ed=2560#${nSplit}`);
+  }
 
   return nodes.join('\n');
 }
@@ -490,7 +498,6 @@ function setNginxHeaders(res, isHtml = true) {
 
 app.get('/favicon.ico', (req, res) => res.status(204).end());
 
-// Northflank 健康检查端点，返回伪装的 nginx 200
 app.get('/health', (req, res) => {
   res.set({ 'Server': NGINX_VER, 'Content-Type': 'text/plain' });
   res.send('OK');
@@ -533,7 +540,7 @@ app.get('/', (req, res) => {
   }
 });
 
-// 订阅入口路由 (含 IP 速率限制防爆破)
+// 订阅入口路由
 app.get(`/${SUB_PATH}`, async (req, res) => {
   const clientIP = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket.remoteAddress || '';
   if (isRateLimited(clientIP)) {
@@ -557,7 +564,6 @@ app.get(`/${SUB_PATH}`, async (req, res) => {
   }
 });
 
-// Default 404 handler for Express
 app.use((req, res) => {
   res.status(404);
   setNginxHeaders(res, true);
@@ -756,7 +762,6 @@ function hVlU(ws, initialMsg, offset, host, port) {
         const len = chunk.readUInt16BE(pos);
         if (chunk.length - pos < 2 + len) break;
         const payload = chunk.subarray(pos + 2, pos + 2 + len);
-        // 单个 UDP 载荷校验：限制最大合法 UDP 数据包尺寸 (65507 字节)
         if (payload && payload.length > 0 && payload.length <= 65507) {
           if (isConnected) {
             try { udpSocket.send(payload); } catch (e) {}
@@ -873,7 +878,6 @@ const wss = new WebSocket.Server({
   }
 });
 
-// ==================== 安全加固：连接频率平滑（每秒最多 5 个新连接） ====================
 let connPerSecCount = 0;
 let connPerSecReset = Date.now();
 
@@ -886,7 +890,6 @@ wss.on('connection', (ws, req) => {
     return;
   }
 
-  // 连接频率平滑：每秒最多接入 5 个新连接，避免突发连接数触发安全告警
   const now = Date.now();
   if ((now - connPerSecReset) > 1000) {
     connPerSecCount = 0;
@@ -898,7 +901,6 @@ wss.on('connection', (ws, req) => {
     return;
   }
 
-  // 自适应低配平台高并发与连接计数释放
   const isLowMem = require('os').totalmem() < 1.5 * 1024 * 1024 * 1024;
   const maxConns = isLowMem ? 80 : 300;
   if (activeConns >= maxConns) {
@@ -1048,11 +1050,10 @@ wss.on('connection', (ws, req) => {
     }
   };
 
-  const MAX_HANDSHAKE_BUFFER = 16384; // 16KB 足够任何合法握手
+  const MAX_HANDSHAKE_BUFFER = 16384;
   const onMessage = msg => {
     if (resolvedHeader) return;
     accumulated = Buffer.concat([accumulated, msg]);
-    // 防止恶意客户端无限发送小消息导致内存膨胀
     if (accumulated.length > MAX_HANDSHAKE_BUFFER) {
       ws.off('message', onMessage);
       clearTimeout(handshakeTimer);
@@ -1107,7 +1108,6 @@ function cfApiCall(method, path, apiToken, body = null) {
 
 async function autoConfigureArgoTunnel() {
   if (ARGO_AUTH.includes('TunnelSecret') || ARGO_AUTH.length > 100) {
-    // 已经是真实的 Tunnel Token，不需要托管
     return;
   }
 
@@ -1119,20 +1119,17 @@ async function autoConfigureArgoTunnel() {
         throw new Error('APP_DOMAIN not configured, cannot auto-bind');
       }
 
-      // 如果 APP_DOMAIN 是 cs1.chatgptaigode.eu.org
-      // 我们将其拆分为 tunnelName = cs1, rootDomain = chatgptaigode.eu.org
       const domainParts = fullDomain.split('.');
       let tunnelName = 'node-auto-tunnel';
       let rootDomain = fullDomain;
 
       if (domainParts.length >= 3) {
-        tunnelName = domainParts[0]; // 例如 cs1
-        rootDomain = domainParts.slice(1).join('.'); // 例如 chatgptaigode.eu.org
+        tunnelName = domainParts[0];
+        rootDomain = domainParts.slice(1).join('.');
       }
       
       console.log(`[init] service: ${tunnelName}, domain: ${rootDomain}`);
 
-      // 1. 获取 Zone ID 和 Account ID
       console.log(`[init] resolving zone for ${rootDomain}...`);
       const zoneRes = await cfApiCall('GET', `/zones?name=${rootDomain}`, ARGO_AUTH);
       if (!zoneRes || !zoneRes.result || zoneRes.result.length === 0) {
@@ -1145,7 +1142,6 @@ async function autoConfigureArgoTunnel() {
       const randomSubdomain = fullDomain;
       console.log(`[init] binding hostname: ${randomSubdomain}`);
 
-      // 3. 查询或创建隧道
       console.log(`[init] checking existing service "${tunnelName}"...`);
       const listRes = await cfApiCall('GET', `/accounts/${accountId}/cfd_tunnel?is_deleted=false`, ARGO_AUTH);
       const tunnels = listRes.result || [];
@@ -1175,7 +1171,6 @@ async function autoConfigureArgoTunnel() {
         console.log(`[init] service created successfully.`);
       }
 
-      // 4. 配置隧道的 Ingress，将新生成的随机域名映射至本地端口
       console.log(`[init] configuring routing rules to port ${PORT}...`);
       await cfApiCall('PUT', `/accounts/${accountId}/cfd_tunnel/${tunnelId}/configurations`, ARGO_AUTH, {
         config: {
@@ -1187,7 +1182,6 @@ async function autoConfigureArgoTunnel() {
         }
       });
 
-      // 5. 自动管理 DNS CNAME 记录，添加新随机子域名的解析
       console.log(`[init] creating DNS record for ${randomSubdomain}...`);
       await cfApiCall('POST', `/zones/${zoneId}/dns_records`, ARGO_AUTH, {
         name: randomSubdomain,
@@ -1196,7 +1190,6 @@ async function autoConfigureArgoTunnel() {
         proxied: true
       });
 
-      // 6. 覆写全局变量与动态子域名供订阅构建使用
       if (realToken) {
         ARGO_AUTH = realToken;
         process.env.AUTO_LAUNCHED_DOMAIN = randomSubdomain;
@@ -1222,7 +1215,7 @@ function download(url, dest, redirectCount = 0) {
     const client = url.startsWith('https') ? https : http;
     const req = client.get(url, { headers: { 'User-Agent': UA }, timeout: 120000 }, (res) => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-        res.resume(); // 必须消费掉响应体，否则底层连接不释放导致泄漏
+        res.resume();
         let redirectUrl = res.headers.location;
         if (!redirectUrl.startsWith('http')) {
           const parsedUrl = new URL(url);
@@ -1324,6 +1317,8 @@ function startCloudflared() {
       `tunnel: ${tid}`, `credentials-file: ${tunnelJsonPath}`, `protocol: ${ARGO_PROTOCOL}`,
       'ingress:', `  - hostname: ${ARGO_DOMAIN}`, `    path: ${PATH_A}`, `    service: http://127.0.0.1:${PORT}`,
       `  - hostname: ${ARGO_DOMAIN}`, `    path: ${PATH_B}`, `    service: http://127.0.0.1:${PORT}`,
+      `  - hostname: ${ARGO_DOMAIN}`, `    path: ${PATH_C}`, `    service: http://127.0.0.1:${PORT}`,
+      `  - hostname: ${ARGO_DOMAIN}`, `    path: ${PATH_D}`, `    service: http://127.0.0.1:${PORT}`,
       `  - hostname: ${ARGO_DOMAIN}`, `    path: /${SUB_PATH}`, `    service: http://127.0.0.1:${PORT}`,
       `  - hostname: ${ARGO_DOMAIN}`, `    service: http://127.0.0.1:${PORT}`,
       '  - service: http_status:404',
@@ -1367,7 +1362,9 @@ function generateCacheConfig() {
           decryption: 'none',
           fallbacks: [
             { path: PATH_A, dest: 8002, xver: 1 },
-            { path: PATH_B, dest: 8003, xver: 1 }
+            { path: PATH_B, dest: 8003, xver: 1 },
+            { path: PATH_C, dest: 8004, xver: 1 },
+            { path: PATH_D, dest: 8005, xver: 1 }
           ]
         },
         streamSettings: { network: 'tcp' }
@@ -1391,6 +1388,26 @@ function generateCacheConfig() {
           network: 'ws',
           wsSettings: { path: PATH_B }
         }
+      },
+      {
+        port: 8004,
+        listen: '127.0.0.1',
+        protocol: P_VL,
+        settings: { clients: [{ id: UUID, level: 0 }], decryption: 'none' },
+        streamSettings: {
+          network: 'grpc',
+          grpcSettings: { serviceName: PATH_C.replace(/^\//, '') }
+        }
+      },
+      {
+        port: 8005,
+        listen: '127.0.0.1',
+        protocol: P_VL,
+        settings: { clients: [{ id: UUID, level: 0 }], decryption: 'none' },
+        streamSettings: {
+          network: 'splithttp',
+          splithttpSettings: { path: PATH_D }
+        }
       }
     ],
     outbounds: [{ protocol: 'freedom', settings: {} }]
@@ -1406,7 +1423,6 @@ function startCacheEngine() {
   }
   generateCacheConfig();
   
-  // 启动子进程，劫持 GOGC 参数防止其占用过多内存
   const child = startProcess('cache', cacheBinPath, ['-config', cacheConfigPath], { GOGC: '30' });
   
   child.on('close', () => {
@@ -1426,7 +1442,6 @@ function startCacheEngine() {
 // ==================== 针对低配容器的自适应看门狗 ====================
 (function memoryWatchdog() {
   setInterval(async () => {
-    // 1. 主 Node.js 进程自身的内存降级监控 (防 procfs 隔离/无权限场景)
     const selfMem = process.memoryUsage();
     const isLowMem = os.totalmem() < 1.5 * 1024 * 1024 * 1024;
     const nodeHeapLimit = isLowMem ? 90 * 1024 * 1024 : 200 * 1024 * 1024;
@@ -1434,7 +1449,6 @@ function startCacheEngine() {
       throttleGC();
     }
 
-    // 2. 子进程监控 (优先 read /proc/<pid>/status，失败则容灾记录)
     for (const [label, child] of managedChildren) {
       if (!child || !child.pid || child.killed) continue;
       const statusPath = `/proc/${child.pid}/status`;
@@ -1451,7 +1465,6 @@ function startCacheEngine() {
           }
         }
       } catch (e) {
-        // procfs 受限或读取失败时的容灾降级：触发通用垃圾回收
         throttleGC();
       }
     }
