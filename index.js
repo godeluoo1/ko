@@ -439,8 +439,8 @@ function buildSub(nodeName) {
     const nGrpc = encodeURIComponent(`${label}-VLESS-gRPC`);
     const nSplit = encodeURIComponent(`${label}-VLESS-XHTTP`);
 
-    nodes.push(`${P_VL}://${UUID}@${CFIP}:${CFPORT}?encryption=none&security=tls&sni=${host}&fp=${FP}&type=grpc&serviceName=${pGrpcService}&mode=gun#${nGrpc}`);
-    nodes.push(`${P_VL}://${UUID}@${CFIP}:${CFPORT}?encryption=none&security=tls&sni=${host}&fp=${FP}&type=splithttp&host=${host}&path=${pSplitPath}&ed=2560#${nSplit}`);
+    nodes.push(`${P_VL}://${UUID}@${CFIP}:${CFPORT}?encryption=none&security=tls&sni=${host}&fp=${FP}&type=grpc&serviceName=${pGrpcService}&mode=gun&alpn=h2#${nGrpc}`);
+    nodes.push(`${P_VL}://${UUID}@${CFIP}:${CFPORT}?encryption=none&security=tls&sni=${host}&fp=${FP}&type=splithttp&host=${host}&path=${pSplitPath}&ed=2560&alpn=h2#${nSplit}`);
   }
 
   return nodes.join('\n');
