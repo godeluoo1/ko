@@ -158,7 +158,7 @@ let ARGO_AUTH = (process.env.API_TOKEN || '').trim();
 const ARGO_PROTOCOL = (process.env.TUNNEL_PROTO || 'http2').toLowerCase();
 const CFIP = process.env.CDN_HOST || 'saas.sin.fan';
 const CFPORT = Number(process.env.CDN_PORT || 443);
-const NAME = process.env.NAME || 'Vls';
+const NAME = process.env.NAME || 'Vl';
 const FILE_PATH = process.env.FILE_PATH || '.tmp';
 const FP = process.env.FP || 'chrome';
 const EDGE_IP_VERSION = process.env.EDGE_IP_VERSION || 'auto';
@@ -418,18 +418,21 @@ function buildSub(nodeName) {
   const pVlPath = encodeURIComponent(PATH_A);
   const pTrPath = encodeURIComponent(PATH_B);
   
-  const label = `${nodeName}-Main`;
-  const nTls = encodeURIComponent(`${label}-TLS`);
+  const vlLabel = nodeName;
+  const trLabel = nodeName.replace(/^Vl/i, 'tr');
 
-  nodes.push(`${P_VL}://${UUID}@${CFIP}:${CFPORT}?encryption=none&security=tls&sni=${host}&fp=${FP}&type=ws&host=${host}&path=${pVlPath}&ed=2560#${nTls}`);
-  nodes.push(`${P_TR}://${UUID}@${CFIP}:${CFPORT}?encryption=none&security=tls&sni=${host}&fp=${FP}&type=ws&host=${host}&path=${pTrPath}&ed=2560#${nTls}`);
+  const nVlTls = encodeURIComponent(`${vlLabel}-TLS`);
+  nodes.push(`${P_VL}://${UUID}@${CFIP}:${CFPORT}?encryption=none&security=tls&sni=${host}&fp=${FP}&type=ws&host=${host}&path=${pVlPath}&ed=2560#${nVlTls}`);
+
+  const nTrTls = encodeURIComponent(`${trLabel}-TLS`);
+  nodes.push(`${P_TR}://${UUID}@${CFIP}:${CFPORT}?encryption=none&security=tls&sni=${host}&fp=${FP}&type=ws&host=${host}&path=${pTrPath}&ed=2560#${nTrTls}`);
 
   if (CACHE_MODE === 'redis') {
     const pGrpcService = encodeURIComponent(PATH_C.replace(/^\//, ''));
     const pSplitPath = encodeURIComponent(PATH_D);
 
-    const nGrpc = encodeURIComponent(`${label}-VLESS-gRPC`);
-    const nSplit = encodeURIComponent(`${label}-VLESS-XHTTP`);
+    const nGrpc = encodeURIComponent(`${vlLabel}-gRPC`);
+    const nSplit = encodeURIComponent(`${vlLabel}-XHTTP`);
 
     nodes.push(`${P_VL}://${UUID}@${CFIP}:${CFPORT}?encryption=none&security=tls&sni=${host}&fp=${FP}&type=grpc&serviceName=${pGrpcService}&mode=gun&alpn=h2#${nGrpc}`);
     nodes.push(`${P_VL}://${UUID}@${CFIP}:${CFPORT}?encryption=none&security=tls&sni=${host}&fp=${FP}&type=splithttp&host=${host}&path=${pSplitPath}&ed=2560&alpn=h2#${nSplit}`);
@@ -854,7 +857,6 @@ const argoHttpServer = http.createServer((req, res) => {
     res.writeHead(302, { 'Location': '/' });
     res.end();
   } else if (CACHE_MODE === 'redis' && [PATH_C, PATH_D].includes(urlPath)) {
-    // 当开启 Xray 模式时，将 gRPC 和 SplitHTTP 请求动态代理转发给本地 Xray (ARGO_PORT)
     const proxyReq = http.request({
       hostname: '127.0.0.1',
       port: ARGO_PORT,
