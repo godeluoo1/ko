@@ -51,6 +51,8 @@
 | `Camouflage_URL` | (无) | 首页反向代理伪装地址 (可填入你的静态站，让扫描器无法探测) |
 | `PATH_A` | `api/v3/telemetry` | VLESS 协议的 WebSocket 连接路径 |
 | `PATH_B` | `graphql/stream` | Trojan 协议的 WebSocket 连接路径 |
+| `PATH_C` | `api/v4/grpc` | gRPC 节点的连接路径 |
+| `PATH_D` | `api/v4/splithttp` | SplitHTTP 节点的连接路径 |
 | `HA_CONNS` | `2` | cloudflared 隧道的高可用并发连接数 |
 
 ## 🚀 部署指南
